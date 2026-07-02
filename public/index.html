@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#17130F" />
+<title>TableTap — QR ordering for your cafe or restaurant</title>
+<link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+<div class="landing">
+  <div class="panel">
+    <div class="brandmark"><span class="qr" id="qr"></span><h1>TableTap</h1></div>
+    <p class="lede">Give every table a QR code. Diners scan, order, pay their way, and track live — no app to install. You manage your menu and kitchen from any browser.</p>
+
+    <a class="enter" style="background:var(--brand)" href="/admin">
+      <span class="lhs"><span id="i1"></span>
+        <span><b>I run a cafe / restaurant</b><small>Sign up or manage your venue</small></span></span>
+      <span id="a1"></span>
+    </a>
+
+    <a class="enter" style="background:#221C16" href="/kitchen">
+      <span class="lhs"><span id="i2" style="color:var(--amber)"></span>
+        <span><b style="color:var(--paper)">Kitchen display</b><small style="color:#A9A39A">Staff sign-in with the venue PIN</small></span></span>
+      <span id="a2"></span>
+    </a>
+
+    <p class="lede" style="margin-top:22px;font-size:13px">
+      Diners don't start here — they scan the QR on their table, which the owner prints from the dashboard.
+    </p>
+  </div>
+</div>
+<script src="/common.js"></script>
+<script>
+  $('#qr').innerHTML = icon('qr', 22, 2.4);
+  $('#i1').innerHTML = icon('store', 22);
+  $('#i2').innerHTML = icon('chef', 22);
+  $('#a1').innerHTML = icon('arrowR', 20);
+  $('#a2').innerHTML = icon('arrowR', 20);
+</script>
+</body>
+</html>
