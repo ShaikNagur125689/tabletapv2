@@ -1,0 +1,12 @@
+{
+  "name": "tabletap",
+  "version": "2.0.0",
+  "description": "Multi-tenant QR table-ordering platform: owners sign up, manage their menu, and run their kitchen. Diners scan, order, pay their way, and track live.",
+  "type": "module",
+  "engines": { "node": ">=22.13" },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "dependencies": { "express": "^4.19.2" }
+}
