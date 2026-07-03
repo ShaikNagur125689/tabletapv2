@@ -4,7 +4,7 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import * as DB from './db.js';
 import {
-  hashPassword, verifyPassword, safeEqual, rateLimit,
+  hashPassword, verifyPassword, passwordIssue, safeEqual, rateLimit,
   issueOwnerToken, verifyOwnerToken, issueKitchenToken, verifyKitchenToken,
   signTable, verifyTable,
 } from './auth.js';
@@ -58,7 +58,8 @@ app.post('/api/owners/register', (req, res) => {
   const venueName = cleanStr(req.body?.venueName, 60);
   const mode = req.body?.mode === 'restaurant' ? 'restaurant' : 'cafe';
   if (!isEmail(email)) return res.status(400).json({ error: 'Enter a valid email.' });
-  if (password.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters.' });
+  const pwErr = passwordIssue(password);
+  if (pwErr) return res.status(400).json({ error: pwErr });
   if (venueName.length < 2) return res.status(400).json({ error: 'Enter your cafe/restaurant name.' });
   if (DB.getOwnerByEmail(email)) return res.status(409).json({ error: 'An account with this email already exists.' });
   const owner = DB.createOwner(email, hashPassword(password));

@@ -17,6 +17,24 @@ export function safeEqual(a, b) {
   return ba.length === bb.length && crypto.timingSafeEqual(ba, bb);
 }
 
+/* ------------------------- password policy ---------------------------- */
+// The most-used leaked passwords; lowercase compare.
+const COMMON_PASSWORDS = new Set([
+  'password', 'password1', 'password123', 'passw0rd', '12345678', '123456789',
+  '1234567890', 'qwerty123', 'qwertyuiop', 'iloveyou', 'iloveyou1', 'admin123',
+  'welcome1', 'welcome123', 'letmein1', 'sunshine1', 'princess1', 'football1',
+  'monkey123', 'dragon123', 'master123', 'shadow123', 'superman1', 'baseball1',
+  'abc12345', 'india123', 'abcd1234', 'pass1234', 'test1234', 'qwer1234',
+]);
+export function passwordIssue(pw) {
+  if (typeof pw !== 'string' || pw.length < 8) return 'Password must be at least 8 characters.';
+  if (pw.length > 72) return 'Password must be under 72 characters.';
+  if (!/[A-Za-z]/.test(pw)) return 'Password must include letters.';
+  if (!/[0-9]/.test(pw)) return 'Password must include at least one number.';
+  if (COMMON_PASSWORDS.has(pw.toLowerCase())) return 'That password is too common — pick something more unique.';
+  return null;
+}
+
 /* ------------------------- password hashing --------------------------- */
 export function hashPassword(password) {
   const salt = crypto.randomBytes(16);
