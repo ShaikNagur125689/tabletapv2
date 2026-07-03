@@ -1,5 +1,5 @@
 // Owner dashboard: sign up / sign in, venue settings, menu management, table QRs.
-const A = { token: null, venue: null, menu: [], authMode: 'login', editing: null };
+const A = { token: null, venue: null, menu: [], authMode: 'login', editing: null, pendingEmail: null };
 const root = () => $('#app');
 
 function boot() {
@@ -42,7 +42,8 @@ function renderAuth(err = '') {
 function setAuthMode(m) { A.authMode = m; renderAuth(); }
 async function submitAuth() {
   const btn = $('#go'); btn.disabled = true;
-  const body = { email: $('#f-email').value, password: $('#f-pass').value };
+  const email = $('#f-email').value;
+  const body = { email, password: $('#f-pass').value };
   let path = '/api/owners/login';
   if (A.authMode === 'register') {
     path = '/api/owners/register';
@@ -50,10 +51,55 @@ async function submitAuth() {
   }
   try {
     const res = await api(path, { method: 'POST', body });
+    if (res.pending) {                       // signup created a pending account
+      A.pendingEmail = res.email;
+      renderVerify();
+      return;
+    }
     A.token = res.token; localStorage.setItem('tt_owner', res.token);
     await loadVenue();
-    if (A.authMode === 'register') toast('Venue created! Set up your menu below.');
-  } catch (e) { btn.disabled = false; $('#err').textContent = e.message; }
+  } catch (e) {
+    if (/verify your email/i.test(e.message)) {  // login on an unverified account
+      A.pendingEmail = email.trim().toLowerCase();
+      renderVerify('We sent a fresh code to your email.');
+      return;
+    }
+    btn.disabled = false; $('#err').textContent = e.message;
+  }
+}
+
+/* --------------------------- email verification ---------------------------- */
+function renderVerify(note = '') {
+  root().innerHTML = `
+  <div class="auth-card">
+    <div class="brandmark" style="margin-bottom:14px"><span class="qr" style="width:34px;height:34px;border-radius:10px;background:var(--amber);display:flex;align-items:center;justify-content:center">${icon('qr',19,2.4)}</span>
+      <h1 style="font-size:21px;margin:0">Check your email</h1></div>
+    <p style="font-size:14px;color:var(--sub);margin:0 0 16px">We sent a 6-digit code to <b>${esc(A.pendingEmail)}</b>. Enter it below to activate your account. It expires in 15 minutes — check spam if you don't see it.</p>
+    <div class="field"><label>Verification code</label>
+      <input id="f-code" inputmode="numeric" maxlength="6" placeholder="6-digit code"
+        style="letter-spacing:8px;font-size:22px;font-weight:800;text-align:center" autocomplete="one-time-code" /></div>
+    <div class="err" id="err" style="color:#B23B3B">${esc(note)}</div>
+    <button class="btn btn-brand" style="width:100%" id="vgo" onclick="submitVerify()">Verify &amp; activate</button>
+    <button class="btn" style="width:100%;margin-top:8px;color:var(--brand);font-size:14px" onclick="resendCode()">Resend code</button>
+    <button class="btn" style="width:100%;color:var(--sub);font-size:13px" onclick="A.pendingEmail=null;renderAuth()">Back to sign in</button>
+  </div>`;
+  const inp = $('#f-code'); inp.focus();
+  inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') submitVerify(); });
+}
+async function submitVerify() {
+  const btn = $('#vgo'); btn.disabled = true; btn.textContent = 'Verifying…';
+  try {
+    const res = await api('/api/owners/verify', { method: 'POST', body: { email: A.pendingEmail, code: $('#f-code').value.trim() } });
+    A.token = res.token; localStorage.setItem('tt_owner', res.token);
+    A.pendingEmail = null;
+    await loadVenue();
+    toast('Account activated — welcome!');
+  } catch (e) { btn.disabled = false; btn.textContent = 'Verify & activate'; $('#err').textContent = e.message; }
+}
+async function resendCode() {
+  try { await api('/api/owners/resend', { method: 'POST', body: { email: A.pendingEmail } });
+    $('#err').style.color = 'var(--sub)'; $('#err').textContent = 'A fresh code is on its way — give it a minute.';
+  } catch (e) { $('#err').textContent = e.message; }
 }
 function logout() { localStorage.removeItem('tt_owner'); A.token = null; renderAuth(); }
 
