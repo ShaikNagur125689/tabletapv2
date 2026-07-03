@@ -33,7 +33,7 @@ function renderAuth(err = '') {
       <option value="cafe">Cafe — diners pay in advance</option>
       <option value="restaurant">Restaurant — diners pay after the meal</option></select></div>` : ''}
     <div class="field"><label>Email</label><input id="f-email" type="email" placeholder="you@example.com" autocomplete="username" /></div>
-    <div class="field"><label>Password ${!login ? '(min 8 characters)' : ''}</label><input id="f-pass" type="password" autocomplete="${login ? 'current-password' : 'new-password'}" /></div>
+    <div class="field"><label>Password ${!login ? "(8+ chars, letters + numbers)" : ""}</label><input id="f-pass" type="password" autocomplete="${login ? 'current-password' : 'new-password'}" /></div>
     <div class="err" id="err" style="color:#B23B3B">${esc(err)}</div>
     <button class="btn btn-brand" style="width:100%" id="go" onclick="submitAuth()">${login ? 'Sign in' : 'Create my venue'}</button>
   </div>`;
