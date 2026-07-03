@@ -16,7 +16,10 @@ db.exec(`
   PRAGMA journal_mode = WAL;
   CREATE TABLE IF NOT EXISTS owners (
     id TEXT PRIMARY KEY, email TEXT UNIQUE NOT NULL,
-    pass_hash TEXT NOT NULL, created_at INTEGER NOT NULL
+    pass_hash TEXT NOT NULL, created_at INTEGER NOT NULL,
+    verified INTEGER NOT NULL DEFAULT 0,
+    verify_code TEXT, verify_expires INTEGER,
+    verify_attempts INTEGER NOT NULL DEFAULT 0
   );
   CREATE TABLE IF NOT EXISTS venues (
     id TEXT PRIMARY KEY, owner_id TEXT NOT NULL,
@@ -50,12 +53,33 @@ export const bus = new EventEmitter();
 bus.setMaxListeners(0);
 const uid = (n = 10) => crypto.randomBytes(n).toString('base64url');
 
+// Migrate databases created before email verification existed.
+for (const stmt of [
+  "ALTER TABLE owners ADD COLUMN verified INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE owners ADD COLUMN verify_code TEXT",
+  "ALTER TABLE owners ADD COLUMN verify_expires INTEGER",
+  "ALTER TABLE owners ADD COLUMN verify_attempts INTEGER NOT NULL DEFAULT 0",
+]) { try { db.exec(stmt); } catch (_) { /* column already exists */ } }
+
 /* ------------------------------- owners -------------------------------- */
-export function createOwner(email, passHash) {
+export function createOwner(email, passHash, verifyCode, verifyExpires) {
   const id = 'own_' + uid();
-  db.prepare('INSERT INTO owners (id, email, pass_hash, created_at) VALUES (?, ?, ?, ?)')
-    .run(id, email, passHash, Date.now());
+  db.prepare(`INSERT INTO owners (id, email, pass_hash, created_at, verified, verify_code, verify_expires)
+              VALUES (?, ?, ?, ?, 0, ?, ?)`)
+    .run(id, email, passHash, Date.now(), verifyCode, verifyExpires);
   return { id, email };
+}
+export function setVerifyCode(id, code, expires) {
+  db.prepare('UPDATE owners SET verify_code = ?, verify_expires = ?, verify_attempts = 0 WHERE id = ?')
+    .run(code, expires, id);
+}
+export function bumpVerifyAttempts(id) {
+  db.prepare('UPDATE owners SET verify_attempts = verify_attempts + 1 WHERE id = ?').run(id);
+  return db.prepare('SELECT verify_attempts FROM owners WHERE id = ?').get(id).verify_attempts;
+}
+export function markVerified(id) {
+  db.prepare('UPDATE owners SET verified = 1, verify_code = NULL, verify_expires = NULL, verify_attempts = 0 WHERE id = ?')
+    .run(id);
 }
 export const getOwnerByEmail = (email) =>
   db.prepare('SELECT * FROM owners WHERE email = ?').get(email) || null;

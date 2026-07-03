@@ -8,6 +8,7 @@ import {
   issueOwnerToken, verifyOwnerToken, issueKitchenToken, verifyKitchenToken,
   signTable, verifyTable,
 } from './auth.js';
+import { sendVerifyCode } from './email.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -50,7 +51,16 @@ function requireKitchen(req, res, next) {
 }
 
 /* ------------------------- owner: register/login ----------------------- */
-app.post('/api/owners/register', (req, res) => {
+const newCode = () => String(crypto.randomInt(100000, 1000000));
+const CODE_TTL = 15 * 60 * 1000;
+
+async function issueAndSendCode(owner, venueName) {
+  const code = newCode();
+  DB.setVerifyCode(owner.id, code, Date.now() + CODE_TTL);
+  return sendVerifyCode(owner.email, code, venueName);
+}
+
+app.post('/api/owners/register', async (req, res) => {
   const rl = rateLimit({ key: 'reg:' + ip(req), limit: 5, windowMs: 3600_000 });
   if (!rl.ok) return res.status(429).json({ error: 'Too many signups. Try later.' });
   const email = cleanStr(req.body?.email, 120).toLowerCase();
@@ -62,19 +72,70 @@ app.post('/api/owners/register', (req, res) => {
   if (pwErr) return res.status(400).json({ error: pwErr });
   if (venueName.length < 2) return res.status(400).json({ error: 'Enter your cafe/restaurant name.' });
   if (DB.getOwnerByEmail(email)) return res.status(409).json({ error: 'An account with this email already exists.' });
-  const owner = DB.createOwner(email, hashPassword(password));
-  const pin = String(crypto.randomInt(100000, 999999)); // starter kitchen PIN; owner can change it
-  const venue = DB.createVenue(owner.id, venueName, mode, pin);
-  res.status(201).json({ token: issueOwnerToken(owner.id), venue: ownerVenueView(venue) });
+
+  const code = newCode();
+  const owner = DB.createOwner(email, hashPassword(password), code, Date.now() + CODE_TTL);
+  const pin = String(crypto.randomInt(100000, 999999));
+  DB.createVenue(owner.id, venueName, mode, pin);
+  await sendVerifyCode(email, code, venueName);
+  // No session token yet — the account activates only after the code is entered.
+  res.status(201).json({ pending: true, email });
 });
 
-app.post('/api/owners/login', (req, res) => {
+app.post('/api/owners/verify', (req, res) => {
+  const rl = rateLimit({ key: 'verify:' + ip(req), limit: 15, windowMs: 600_000 });
+  if (!rl.ok) return res.status(429).json({ error: 'Too many attempts. Wait a bit.' });
+  const email = cleanStr(req.body?.email, 120).toLowerCase();
+  const code = cleanStr(req.body?.code, 10);
+  const owner = DB.getOwnerByEmail(email);
+  if (!owner) return res.status(400).json({ error: 'Wrong code. Check the email and try again.' });
+  const venue = DB.getVenueByOwner(owner.id);
+  if (owner.verified) {
+    // Already verified — treat as success so a double-tap doesn't confuse anyone.
+    return res.json({ token: issueOwnerToken(owner.id), venue: ownerVenueView(venue) });
+  }
+  if (owner.verify_attempts >= 5) {
+    return res.status(429).json({ error: 'Too many wrong codes. Tap "Resend code" to get a fresh one.' });
+  }
+  if (!owner.verify_code || !owner.verify_expires || Date.now() > owner.verify_expires) {
+    return res.status(400).json({ error: 'That code has expired. Tap "Resend code" to get a fresh one.' });
+  }
+  if (!safeEqual(code, owner.verify_code)) {
+    DB.bumpVerifyAttempts(owner.id);
+    return res.status(400).json({ error: 'Wrong code. Check the email and try again.' });
+  }
+  DB.markVerified(owner.id);
+  res.json({ token: issueOwnerToken(owner.id), venue: ownerVenueView(venue) });
+});
+
+app.post('/api/owners/resend', async (req, res) => {
+  const email = cleanStr(req.body?.email, 120).toLowerCase();
+  const rl = rateLimit({ key: 'resend:' + email, limit: 3, windowMs: 600_000 });
+  if (!rl.ok) return res.status(429).json({ error: 'Code already sent — wait a few minutes before requesting another.' });
+  const owner = DB.getOwnerByEmail(email);
+  if (owner && !owner.verified) {
+    const venue = DB.getVenueByOwner(owner.id);
+    await issueAndSendCode(owner, venue ? venue.name : '');
+  }
+  // Always the same answer, so this endpoint can't be used to probe which emails exist.
+  res.json({ ok: true });
+});
+
+app.post('/api/owners/login', async (req, res) => {
   const rl = rateLimit({ key: 'login:' + ip(req), limit: 10, windowMs: 600_000 });
   if (!rl.ok) return res.status(429).json({ error: 'Too many attempts. Wait a bit.' });
   const email = cleanStr(req.body?.email, 120).toLowerCase();
   const owner = DB.getOwnerByEmail(email);
   if (!owner || !verifyPassword(String(req.body?.password || ''), owner.pass_hash)) {
     return res.status(401).json({ error: 'Wrong email or password.' });
+  }
+  if (!owner.verified) {
+    const sendRl = rateLimit({ key: 'resend:' + email, limit: 3, windowMs: 600_000 });
+    if (sendRl.ok) {
+      const venue = DB.getVenueByOwner(owner.id);
+      await issueAndSendCode(owner, venue ? venue.name : '');
+    }
+    return res.status(403).json({ error: 'Please verify your email first — we just sent you a code.', unverified: true });
   }
   const venue = DB.getVenueByOwner(owner.id);
   res.json({ token: issueOwnerToken(owner.id), venue: ownerVenueView(venue) });
