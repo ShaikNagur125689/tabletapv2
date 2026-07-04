@@ -253,6 +253,24 @@ app.delete('/api/owner/menu/:id', requireOwner, async (req, res, next) => {
   catch (e) { next(e); }
 });
 
+app.get('/api/owner/summary', requireOwner, async (req, res, next) => {
+  try {
+    const since = Number(req.query.since);
+    if (!Number.isFinite(since) || since < 0) return res.status(400).json({ error: 'Bad since timestamp.' });
+    const orders = await DB.listOrdersSince(req.venue.id, since);
+    const live = orders.filter((o) => o.status !== 'cancelled');
+    const sum = (arr) => arr.reduce((s, o) => s + o.total, 0);
+    res.json({ summary: {
+      orders: live.length,
+      revenue: sum(live),
+      paidOnline: sum(live.filter((o) => o.paid && o.method === 'online')),
+      paidCash: sum(live.filter((o) => o.paid && o.method === 'cash')),
+      unpaid: sum(live.filter((o) => !o.paid)),
+      cancelled: orders.length - live.length,
+    }});
+  } catch (e) { next(e); }
+});
+
 app.get('/api/owner/table-link/:table', requireOwner, (req, res) => {
   const table = String(req.params.table);
   if (!isTable(table)) return res.status(400).json({ error: 'Table id: letters/numbers only.' });
@@ -294,6 +312,7 @@ app.post('/api/venues/:venueId/orders', async (req, res, next) => {
     if (!venue) return res.status(404).json({ error: 'Venue not found.' });
 
     const { table, sig, lines, pay, idempotencyKey } = req.body || {};
+    const note = cleanStr(req.body?.note, 200) || null;
     const ikey = idempotencyKey ? venue.id + ':' + cleanStr(idempotencyKey, 64) : null;
     if (ikey && idempo.has(ikey)) {
       const existing = await DB.getOrder(venue.id, idempo.get(ikey));
@@ -331,7 +350,7 @@ app.post('/api/venues/:venueId/orders', async (req, res, next) => {
       venueId: venue.id, token: await DB.nextToken(venue.id), table: String(table),
       items, subtotal, tax, total, status: 'placed',
       timing: payMode === 'now' ? 'advance' : 'after',
-      method: payMode === 'now' ? method : null, paid, paymentRef, placedAt: Date.now(),
+      method: payMode === 'now' ? method : null, paid, paymentRef, note, placedAt: Date.now(),
     });
     if (ikey) idempo.set(ikey, order.token);
     res.status(201).json({ order: publicOrder(order) });
@@ -350,7 +369,7 @@ app.post('/api/venues/:venueId/orders/:token/settle', async (req, res, next) => 
   try {
     const o = await DB.getOrder(req.params.venueId, Number(req.params.token));
     if (!o) return res.status(404).json({ error: 'Order not found.' });
-    if (o.timing !== 'after' || o.paid) return res.status(409).json({ error: 'Nothing to settle.' });
+    if (o.status === 'cancelled' || o.timing !== 'after' || o.paid) return res.status(409).json({ error: 'Nothing to settle.' });
     const method = req.body?.method === 'cash' ? 'cash' : 'online';
     if (method === 'online') {
       const r = await simulatedGatewayCharge(o.total);
@@ -358,6 +377,26 @@ app.post('/api/venues/:venueId/orders/:token/settle', async (req, res, next) => 
       return res.json({ order: publicOrder(await DB.updateOrder(o.venueId, o.token, { method, paid: true })) });
     }
     res.json({ order: publicOrder(await DB.updateOrder(o.venueId, o.token, { method, paid: false })) });
+  } catch (e) { next(e); }
+});
+
+// Diner cancels their own order — allowed only before the kitchen starts.
+// Requires the table's signed QR params, so sequential token numbers can't be
+// abused to cancel other tables' orders.
+app.post('/api/venues/:venueId/orders/:token/cancel', async (req, res, next) => {
+  try {
+    const o = await DB.getOrder(req.params.venueId, Number(req.params.token));
+    if (!o) return res.status(404).json({ error: 'Order not found.' });
+    const { table, sig } = req.body || {};
+    if (String(table) !== o.table || !verifyTable(req.params.venueId, String(table), sig)) {
+      return res.status(403).json({ error: 'Invalid table code.' });
+    }
+    if (o.status === 'cancelled') return res.status(409).json({ error: 'Already cancelled.' });
+    if (o.status !== 'placed') {
+      return res.status(409).json({ error: 'The kitchen has already started preparing this order — please speak to the staff.' });
+    }
+    const updated = await DB.updateOrder(o.venueId, o.token, { status: 'cancelled', cancelledBy: 'diner' });
+    res.json({ order: publicOrder(updated) });
   } catch (e) { next(e); }
 });
 
@@ -387,6 +426,19 @@ app.post('/api/venues/:venueId/kitchen/orders/:token/advance', requireKitchen, a
     res.json({ order: publicOrder(await DB.updateOrder(o.venueId, o.token, { status: FLOW[i + 1] })) });
   } catch (e) { next(e); }
 });
+app.post('/api/venues/:venueId/kitchen/orders/:token/cancel', requireKitchen, async (req, res, next) => {
+  try {
+    const o = await DB.getOrder(req.params.venueId, Number(req.params.token));
+    if (!o) return res.status(404).json({ error: 'Order not found.' });
+    if (o.status === 'completed' || o.status === 'cancelled') {
+      return res.status(409).json({ error: 'This order can no longer be cancelled.' });
+    }
+    const reason = cleanStr(req.body?.reason, 120) || null;
+    const updated = await DB.updateOrder(o.venueId, o.token, { status: 'cancelled', cancelledBy: 'kitchen', cancelReason: reason });
+    res.json({ order: publicOrder(updated) });
+  } catch (e) { next(e); }
+});
+
 app.post('/api/venues/:venueId/kitchen/orders/:token/collect', requireKitchen, async (req, res, next) => {
   try {
     const o = await DB.getOrder(req.params.venueId, Number(req.params.token));
@@ -431,6 +483,7 @@ function publicOrder(o) {
     token: o.token, table: o.table, items: o.items,
     subtotal: o.subtotal, tax: o.tax, total: o.total,
     status: o.status, timing: o.timing, method: o.method, paid: o.paid,
+    note: o.note || null, cancelReason: o.cancelReason || null, cancelledBy: o.cancelledBy || null,
     placedAt: o.placedAt, updatedAt: o.updatedAt,
   };
 }

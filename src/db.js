@@ -45,7 +45,8 @@ const SCHEMA = [
     subtotal INTEGER NOT NULL, tax INTEGER NOT NULL, total INTEGER NOT NULL,
     status TEXT NOT NULL DEFAULT 'placed',
     timing TEXT NOT NULL, method TEXT, paid INTEGER NOT NULL DEFAULT 0,
-    payment_ref TEXT, placed_at BIGINT NOT NULL, updated_at BIGINT NOT NULL,
+    payment_ref TEXT, note TEXT, cancel_reason TEXT, cancelled_by TEXT,
+    placed_at BIGINT NOT NULL, updated_at BIGINT NOT NULL,
     PRIMARY KEY (venue_id, token),
     FOREIGN KEY (venue_id) REFERENCES venues(id)
   )`,
@@ -78,6 +79,9 @@ if (process.env.DATABASE_URL) {
     'ALTER TABLE owners ADD COLUMN IF NOT EXISTS reset_code TEXT',
     'ALTER TABLE owners ADD COLUMN IF NOT EXISTS reset_expires BIGINT',
     'ALTER TABLE owners ADD COLUMN IF NOT EXISTS reset_attempts INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE orders ADD COLUMN IF NOT EXISTS note TEXT',
+    'ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancel_reason TEXT',
+    'ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancelled_by TEXT',
   ]) await q.run(s);
   console.log('[db] PostgreSQL connected — data persists across restarts and redeploys.');
 } else {
@@ -97,6 +101,9 @@ if (process.env.DATABASE_URL) {
     'ALTER TABLE owners ADD COLUMN reset_code TEXT',
     'ALTER TABLE owners ADD COLUMN reset_expires BIGINT',
     'ALTER TABLE owners ADD COLUMN reset_attempts INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE orders ADD COLUMN note TEXT',
+    'ALTER TABLE orders ADD COLUMN cancel_reason TEXT',
+    'ALTER TABLE orders ADD COLUMN cancelled_by TEXT',
   ]) { try { db.exec(s); } catch (_) {} }
   q = {
     run: async (sql, p = []) => { db.prepare(sql).run(...p); },
@@ -192,14 +199,15 @@ const rowToOrder = (r) => r && ({
   items: JSON.parse(r.items_json),
   subtotal: Number(r.subtotal), tax: Number(r.tax), total: Number(r.total),
   status: r.status, timing: r.timing, method: r.method, paid: !!Number(r.paid),
+  note: r.note || null, cancelReason: r.cancel_reason || null, cancelledBy: r.cancelled_by || null,
   placedAt: Number(r.placed_at), updatedAt: Number(r.updated_at),
 });
 export async function createOrder(o) {
   await q.run(`INSERT INTO orders (venue_id, token, table_id, items_json, subtotal, tax, total,
-      status, timing, method, paid, payment_ref, placed_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      status, timing, method, paid, payment_ref, note, placed_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [o.venueId, o.token, o.table, JSON.stringify(o.items), o.subtotal, o.tax, o.total,
-     o.status, o.timing, o.method, o.paid ? 1 : 0, o.paymentRef || null, o.placedAt, o.placedAt]);
+     o.status, o.timing, o.method, o.paid ? 1 : 0, o.paymentRef || null, o.note || null, o.placedAt, o.placedAt]);
   const saved = await getOrder(o.venueId, o.token);
   bus.emit('venue:' + o.venueId, saved);
   bus.emit('order:' + o.venueId + ':' + o.token, saved);
@@ -211,12 +219,16 @@ export async function getOrder(venueId, token) {
 export async function updateOrder(venueId, token, patch) {
   const cur = await getOrder(venueId, token); if (!cur) return null;
   const m = { ...cur, ...patch };
-  await q.run('UPDATE orders SET status = ?, method = ?, paid = ?, updated_at = ? WHERE venue_id = ? AND token = ?',
-    [m.status, m.method, m.paid ? 1 : 0, Date.now(), venueId, token]);
+  await q.run(`UPDATE orders SET status = ?, method = ?, paid = ?, cancel_reason = ?, cancelled_by = ?, updated_at = ?
+               WHERE venue_id = ? AND token = ?`,
+    [m.status, m.method, m.paid ? 1 : 0, m.cancelReason || null, m.cancelledBy || null, Date.now(), venueId, token]);
   const saved = await getOrder(venueId, token);
   bus.emit('venue:' + venueId, saved);
   bus.emit('order:' + venueId + ':' + token, saved);
   return saved;
+}
+export async function listOrdersSince(venueId, since) {
+  return (await q.all('SELECT * FROM orders WHERE venue_id = ? AND placed_at >= ? ORDER BY token', [venueId, since])).map(rowToOrder);
 }
 export async function listOrders(venueId) {
   return (await q.all('SELECT * FROM orders WHERE venue_id = ? ORDER BY token', [venueId])).map(rowToOrder);
