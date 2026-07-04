@@ -21,7 +21,9 @@ const SCHEMA = [
     pass_hash TEXT NOT NULL, created_at BIGINT NOT NULL,
     verified INTEGER NOT NULL DEFAULT 0,
     verify_code TEXT, verify_expires BIGINT,
-    verify_attempts INTEGER NOT NULL DEFAULT 0
+    verify_attempts INTEGER NOT NULL DEFAULT 0,
+    reset_code TEXT, reset_expires BIGINT,
+    reset_attempts INTEGER NOT NULL DEFAULT 0
   )`,
   `CREATE TABLE IF NOT EXISTS venues (
     id TEXT PRIMARY KEY, owner_id TEXT NOT NULL,
@@ -71,6 +73,12 @@ if (process.env.DATABASE_URL) {
     all: async (sql, p = []) => (await pool.query(toPg(sql), p)).rows,
   };
   for (const s of SCHEMA) await q.run(s);
+  // Upgrade tables created by earlier versions (safe on every start).
+  for (const s of [
+    'ALTER TABLE owners ADD COLUMN IF NOT EXISTS reset_code TEXT',
+    'ALTER TABLE owners ADD COLUMN IF NOT EXISTS reset_expires BIGINT',
+    'ALTER TABLE owners ADD COLUMN IF NOT EXISTS reset_attempts INTEGER NOT NULL DEFAULT 0',
+  ]) await q.run(s);
   console.log('[db] PostgreSQL connected — data persists across restarts and redeploys.');
 } else {
   /* ------------------------------- SQLite ------------------------------- */
@@ -86,6 +94,9 @@ if (process.env.DATABASE_URL) {
     'ALTER TABLE owners ADD COLUMN verify_code TEXT',
     'ALTER TABLE owners ADD COLUMN verify_expires BIGINT',
     'ALTER TABLE owners ADD COLUMN verify_attempts INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE owners ADD COLUMN reset_code TEXT',
+    'ALTER TABLE owners ADD COLUMN reset_expires BIGINT',
+    'ALTER TABLE owners ADD COLUMN reset_attempts INTEGER NOT NULL DEFAULT 0',
   ]) { try { db.exec(s); } catch (_) {} }
   q = {
     run: async (sql, p = []) => { db.prepare(sql).run(...p); },
@@ -114,6 +125,17 @@ export async function bumpVerifyAttempts(id) {
 }
 export async function markVerified(id) {
   await q.run('UPDATE owners SET verified = 1, verify_code = NULL, verify_expires = NULL, verify_attempts = 0 WHERE id = ?', [id]);
+}
+export async function setResetCode(id, code, expires) {
+  await q.run('UPDATE owners SET reset_code = ?, reset_expires = ?, reset_attempts = 0 WHERE id = ?', [code, expires, id]);
+}
+export async function bumpResetAttempts(id) {
+  await q.run('UPDATE owners SET reset_attempts = reset_attempts + 1 WHERE id = ?', [id]);
+  const r = await q.get('SELECT reset_attempts FROM owners WHERE id = ?', [id]);
+  return r ? Number(r.reset_attempts) : 0;
+}
+export async function updatePassword(id, passHash) {
+  await q.run('UPDATE owners SET pass_hash = ?, reset_code = NULL, reset_expires = NULL, reset_attempts = 0 WHERE id = ?', [passHash, id]);
 }
 
 /* --------------------------------- venues -------------------------------- */

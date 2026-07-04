@@ -8,6 +8,22 @@ const KEY = process.env.BREVO_API_KEY || '';
 const SENDER = process.env.BREVO_SENDER || '';
 
 export async function sendVerifyCode(to, code, venueName) {
+  return sendCode(to, code, {
+    subject: `${code} is your TableTap verification code`,
+    line: `Enter it on the sign-up screen to activate your account${venueName ? ' for ' + venueName : ''}.`,
+    ignore: `If you didn't create a TableTap account, you can ignore this email.`,
+  });
+}
+
+export async function sendResetCode(to, code) {
+  return sendCode(to, code, {
+    subject: `${code} is your TableTap password reset code`,
+    line: `Enter it on the "Forgot password" screen to set a new password.`,
+    ignore: `If you didn't request a password reset, you can ignore this email — your password stays unchanged.`,
+  });
+}
+
+async function sendCode(to, code, t) {
   if (!KEY || !SENDER) {
     console.log(`[verify] Code for ${to}: ${code}  (set BREVO_API_KEY and BREVO_SENDER in Render to send real emails)`);
     return { ok: true, dev: true };
@@ -19,20 +35,20 @@ export async function sendVerifyCode(to, code, venueName) {
       body: JSON.stringify({
         sender: { name: 'TableTap', email: SENDER },
         to: [{ email: to }],
-        subject: `${code} is your TableTap verification code`,
+        subject: t.subject,
         textContent:
-`Your TableTap verification code is: ${code}
+`Your TableTap code is: ${code}
 
-It expires in 15 minutes. Enter it on the sign-up screen to activate your account${venueName ? ' for ' + venueName : ''}.
+It expires in 15 minutes. ${t.line}
 
-If you didn't create a TableTap account, you can ignore this email.`,
+${t.ignore}`,
         htmlContent:
 `<div style="font-family:Arial,sans-serif;max-width:440px;margin:0 auto;padding:24px">
   <h2 style="margin:0 0 6px">TableTap</h2>
-  <p>Your verification code is:</p>
+  <p>Your code is:</p>
   <p style="font-size:34px;font-weight:800;letter-spacing:6px;margin:10px 0">${code}</p>
-  <p style="color:#555">It expires in 15 minutes. Enter it on the sign-up screen to activate your account${venueName ? ' for <b>' + venueName + '</b>' : ''}.</p>
-  <p style="color:#999;font-size:12px">If you didn't create a TableTap account, ignore this email.</p>
+  <p style="color:#555">It expires in 15 minutes. ${t.line}</p>
+  <p style="color:#999;font-size:12px">${t.ignore}</p>
 </div>`,
       }),
     });

@@ -8,7 +8,7 @@ import {
   issueOwnerToken, verifyOwnerToken, issueKitchenToken, verifyKitchenToken,
   signTable, verifyTable,
 } from './auth.js';
-import { sendVerifyCode } from './email.js';
+import { sendVerifyCode, sendResetCode } from './email.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -124,6 +124,49 @@ app.post('/api/owners/resend', async (req, res, next) => {
       await issueAndSendCode(owner, venue ? venue.name : '');
     }
     // Always the same answer, so this endpoint can't be used to probe which emails exist.
+    res.json({ ok: true });
+  } catch (e) { next(e); }
+});
+
+app.post('/api/owners/forgot', async (req, res, next) => {
+  try {
+    const email = cleanStr(req.body?.email, 120).toLowerCase();
+    const rlE = rateLimit({ key: 'forgot:' + email, limit: 3, windowMs: 600_000 });
+    const rlI = rateLimit({ key: 'forgotip:' + ip(req), limit: 10, windowMs: 600_000 });
+    if (!rlE.ok || !rlI.ok) return res.status(429).json({ error: 'Code already sent — wait a few minutes before requesting another.' });
+    const owner = await DB.getOwnerByEmail(email);
+    if (owner) {
+      const code = newCode();
+      await DB.setResetCode(owner.id, code, Date.now() + CODE_TTL);
+      await sendResetCode(email, code);
+    }
+    // Same answer whether or not the email exists — no account probing.
+    res.json({ ok: true });
+  } catch (e) { next(e); }
+});
+
+app.post('/api/owners/reset', async (req, res, next) => {
+  try {
+    const rl = rateLimit({ key: 'reset:' + ip(req), limit: 15, windowMs: 600_000 });
+    if (!rl.ok) return res.status(429).json({ error: 'Too many attempts. Wait a bit.' });
+    const email = cleanStr(req.body?.email, 120).toLowerCase();
+    const code = cleanStr(req.body?.code, 10);
+    const newPassword = String(req.body?.newPassword || '');
+    const pwErr = passwordIssue(newPassword);
+    if (pwErr) return res.status(400).json({ error: pwErr });
+    const owner = await DB.getOwnerByEmail(email);
+    if (!owner) return res.status(400).json({ error: 'Wrong code. Check the email and try again.' });
+    if (Number(owner.reset_attempts) >= 5) {
+      return res.status(429).json({ error: 'Too many wrong codes. Request a fresh one from "Forgot password".' });
+    }
+    if (!owner.reset_code || !owner.reset_expires || Date.now() > Number(owner.reset_expires)) {
+      return res.status(400).json({ error: 'That code has expired. Request a fresh one from "Forgot password".' });
+    }
+    if (!safeEqual(code, owner.reset_code)) {
+      await DB.bumpResetAttempts(owner.id);
+      return res.status(400).json({ error: 'Wrong code. Check the email and try again.' });
+    }
+    await DB.updatePassword(owner.id, hashPassword(newPassword));
     res.json({ ok: true });
   } catch (e) { next(e); }
 });
