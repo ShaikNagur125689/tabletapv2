@@ -43,6 +43,7 @@ function renderLogin(err = '') {
   $('#pin').addEventListener('keydown', (e) => { if (e.key === 'Enter') doLogin(); });
 }
 async function doLogin() {
+  initAudio();
   const btn = $('#go'); btn.disabled = true; btn.textContent = 'Signing in…';
   K.venueId = $('#vid').value.trim();
   try {
@@ -67,10 +68,33 @@ function subscribe() {
       const o = JSON.parse(ev.data);
       const existed = K.orders.has(o.token);
       K.orders.set(o.token, o);
-      if (!existed) { K.flash = true; setTimeout(() => { K.flash = false; const d = $('#liveDot'); if (d) d.style.background = 'var(--s-ready)'; }, 1200); }
+      if (!existed) {
+        chime(); // new ticket — staff aren't staring at the screen
+        K.flash = true; setTimeout(() => { K.flash = false; const d = $('#liveDot'); if (d) d.style.background = 'var(--s-ready)'; }, 1200);
+      }
       renderBoard();
     } catch (_) {}
   };
+}
+
+// Two-tone alert using WebAudio (no sound file needed). The AudioContext is
+// created on the sign-in click, so browsers allow it to play.
+let audioCtx = null;
+function initAudio() { try { audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)(); audioCtx.resume(); } catch (_) {} }
+function chime() {
+  if (!audioCtx) return;
+  try {
+    const t0 = audioCtx.currentTime;
+    [[880, 0], [1175, 0.18]].forEach(([freq, dt]) => {
+      const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+      o.frequency.value = freq; o.type = 'sine';
+      g.gain.setValueAtTime(0.0001, t0 + dt);
+      g.gain.exponentialRampToValueAtTime(0.4, t0 + dt + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + dt + 0.35);
+      o.connect(g); g.connect(audioCtx.destination);
+      o.start(t0 + dt); o.stop(t0 + dt + 0.4);
+    });
+  } catch (_) {}
 }
 
 function renderBoard() {

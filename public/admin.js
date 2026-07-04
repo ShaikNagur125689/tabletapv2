@@ -36,6 +36,7 @@ function renderAuth(err = '') {
     <div class="field"><label>Password ${!login ? "(8+ chars, letters + numbers)" : ""}</label><input id="f-pass" type="password" autocomplete="${login ? 'current-password' : 'new-password'}" /></div>
     <div class="err" id="err" style="color:#B23B3B">${esc(err)}</div>
     <button class="btn btn-brand" style="width:100%" id="go" onclick="submitAuth()">${login ? 'Sign in' : 'Create my venue'}</button>
+    ${login ? `<button class="btn" style="width:100%;margin-top:8px;color:var(--brand);font-size:14px" onclick="renderForgot()">Forgot password?</button>` : ''}
   </div>`;
   $('#f-pass').addEventListener('keydown', (e) => { if (e.key === 'Enter') submitAuth(); });
 }
@@ -100,6 +101,65 @@ async function resendCode() {
   try { await api('/api/owners/resend', { method: 'POST', body: { email: A.pendingEmail } });
     $('#err').style.color = 'var(--sub)'; $('#err').textContent = 'A fresh code is on its way — give it a minute.';
   } catch (e) { $('#err').textContent = e.message; }
+}
+
+/* ----------------------------- password reset ------------------------------ */
+function renderForgot() {
+  root().innerHTML = `
+  <div class="auth-card">
+    <div class="brandmark" style="margin-bottom:14px"><span class="qr" style="width:34px;height:34px;border-radius:10px;background:var(--amber);display:flex;align-items:center;justify-content:center">${icon('qr',19,2.4)}</span>
+      <h1 style="font-size:21px;margin:0">Reset password</h1></div>
+    <p style="font-size:14px;color:var(--sub);margin:0 0 16px">Enter your account email and we'll send you a 6-digit reset code.</p>
+    <div class="field"><label>Email</label><input id="f-email" type="email" placeholder="you@example.com" autocomplete="username" /></div>
+    <div class="err" id="err" style="color:#B23B3B"></div>
+    <button class="btn btn-brand" style="width:100%" id="fgo" onclick="submitForgot()">Send reset code</button>
+    <button class="btn" style="width:100%;color:var(--sub);font-size:13px" onclick="renderAuth()">Back to sign in</button>
+  </div>`;
+  const inp = $('#f-email'); inp.focus();
+  inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') submitForgot(); });
+}
+async function submitForgot() {
+  const btn = $('#fgo'); btn.disabled = true; btn.textContent = 'Sending…';
+  A.pendingEmail = $('#f-email').value.trim().toLowerCase();
+  try {
+    await api('/api/owners/forgot', { method: 'POST', body: { email: A.pendingEmail } });
+    renderReset();
+  } catch (e) { btn.disabled = false; btn.textContent = 'Send reset code'; $('#err').textContent = e.message; }
+}
+function renderReset(note = '') {
+  root().innerHTML = `
+  <div class="auth-card">
+    <div class="brandmark" style="margin-bottom:14px"><span class="qr" style="width:34px;height:34px;border-radius:10px;background:var(--amber);display:flex;align-items:center;justify-content:center">${icon('qr',19,2.4)}</span>
+      <h1 style="font-size:21px;margin:0">Check your email</h1></div>
+    <p style="font-size:14px;color:var(--sub);margin:0 0 16px">If an account exists for <b>${esc(A.pendingEmail)}</b>, a 6-digit code is on its way (check spam). Enter it with your new password.</p>
+    <div class="field"><label>Reset code</label>
+      <input id="f-code" inputmode="numeric" maxlength="6" placeholder="6-digit code"
+        style="letter-spacing:8px;font-size:22px;font-weight:800;text-align:center" autocomplete="one-time-code" /></div>
+    <div class="field"><label>New password (8+ chars, letters + numbers)</label>
+      <input id="f-newpass" type="password" autocomplete="new-password" /></div>
+    <div class="err" id="err" style="color:#B23B3B">${esc(note)}</div>
+    <button class="btn btn-brand" style="width:100%" id="rgo" onclick="submitReset()">Set new password</button>
+    <button class="btn" style="width:100%;margin-top:8px;color:var(--brand);font-size:14px" onclick="submitForgot2()">Resend code</button>
+    <button class="btn" style="width:100%;color:var(--sub);font-size:13px" onclick="renderAuth()">Back to sign in</button>
+  </div>`;
+  $('#f-code').focus();
+  $('#f-newpass').addEventListener('keydown', (e) => { if (e.key === 'Enter') submitReset(); });
+}
+async function submitReset() {
+  const btn = $('#rgo'); btn.disabled = true; btn.textContent = 'Saving…';
+  try {
+    await api('/api/owners/reset', { method: 'POST', body: {
+      email: A.pendingEmail, code: $('#f-code').value.trim(), newPassword: $('#f-newpass').value,
+    }});
+    A.pendingEmail = null; A.authMode = 'login';
+    renderAuth();
+    toast('Password updated — sign in with your new password');
+  } catch (e) { btn.disabled = false; btn.textContent = 'Set new password'; $('#err').textContent = e.message; }
+}
+async function submitForgot2() {
+  try { await api('/api/owners/forgot', { method: 'POST', body: { email: A.pendingEmail } });
+    $('#err').style.color = 'var(--sub)'; $('#err').textContent = 'A fresh code is on its way — give it a minute.';
+  } catch (e) { $('#err').style.color = '#B23B3B'; $('#err').textContent = e.message; }
 }
 function logout() { localStorage.removeItem('tt_owner'); A.token = null; renderAuth(); }
 
