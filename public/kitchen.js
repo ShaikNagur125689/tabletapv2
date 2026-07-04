@@ -1,6 +1,6 @@
 // Kitchen display, venue-scoped. Staff sign in with the venue code + the PIN
 // the owner set in the dashboard.
-const K = { venueId: null, token: null, venue: null, orders: new Map(), es: null, flash: false };
+const K = { venueId: null, token: null, venue: null, orders: new Map(), es: null, flash: false, unacked: new Set() };
 const COLS = [
   { key: 'placed', title: 'New', action: 'Start preparing' },
   { key: 'preparing', title: 'Preparing', action: 'Mark ready' },
@@ -68,14 +68,19 @@ function subscribe() {
       const o = JSON.parse(ev.data);
       const existed = K.orders.has(o.token);
       K.orders.set(o.token, o);
-      if (!existed) {
-        chime(); // new ticket — staff aren't staring at the screen
+      if (o.status !== 'placed') K.unacked.delete(o.token);
+      if (!existed && o.status === 'placed') {
+        K.unacked.add(o.token); // nags every 10s until a human acknowledges it
+        chime();
         K.flash = true; setTimeout(() => { K.flash = false; const d = $('#liveDot'); if (d) d.style.background = 'var(--s-ready)'; }, 1200);
       }
       renderBoard();
     } catch (_) {}
   };
 }
+
+setInterval(() => { if (K.unacked.size > 0) chime(); }, 10_000);
+function ack(token) { if (K.unacked.delete(token)) renderBoard(); }
 
 // Two-tone alert using WebAudio (no sound file needed). The AudioContext is
 // created on the sign-in click, so browsers allow it to play.
@@ -100,7 +105,7 @@ function chime() {
 function renderBoard() {
   const all = [...K.orders.values()].sort((a, b) => a.token - b.token);
   const open = all.filter((o) => o.status !== 'completed');
-  const done = all.filter((o) => o.status === 'completed').slice(-6).reverse();
+  const done = all.filter((o) => o.status === 'completed' || o.status === 'cancelled').slice(-8).reverse();
 
   let body;
   if (open.length === 0) {
@@ -115,7 +120,10 @@ function renderBoard() {
     }).join('') + `</div>`;
   }
   const doneStrip = done.length ? `<div style="margin-top:26px"><div style="font-size:12px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;color:#6E6962;margin:0 2px 8px">Recently completed</div>
-    <div class="done-row">` + done.map((o) => `<span class="done-chip"><b>#${o.token}</b> · T${esc(o.table)} · ${money(o.total)}</span>`).join('') + `</div></div>` : '';
+    <div class="done-row">` + done.map((o) => {
+      const canc = o.status === 'cancelled';
+      return `<span class="done-chip" ${canc ? 'style="color:#C97B7B"' : ''}><b ${canc ? 'style="color:#C97B7B"' : ''}>${canc ? '✕ ' : ''}#${o.token}</b> · T${esc(o.table)} · ${money(o.total)}${canc && o.paid ? ' · refund due' : ''}</span>`;
+    }).join('') + `</div></div>` : '';
 
   root().innerHTML = `<div class="kdb">
     <div class="topbar2"><div class="row">
@@ -128,6 +136,7 @@ function renderBoard() {
 }
 
 function ticket(o, action) {
+  const unacked = K.unacked.has(o.token);
   const cashDue = o.method === 'cash' && !o.paid;
   const payAfter = o.timing === 'after' && !o.paid && o.method !== 'cash';
   const mins = Math.max(0, Math.floor((Date.now() - o.placedAt) / 60000));
@@ -140,16 +149,30 @@ function ticket(o, action) {
   const advanceBtn = o.status !== 'completed' ? `<button class="btn" style="background:var(--s-${o.status});color:#fff" onclick="advance(${o.token})">${action}</button>` : '';
   const collectBtn = cashDue ? `<button class="btn" style="background:#FBF1DD;color:#9A6312;border:1px solid #F0DDB4" onclick="collect(${o.token})">Mark cash collected</button>`
     : (payAfter && (o.status === 'ready' || o.status === 'completed')) ? `<button class="btn btn-ghost" onclick="collect(${o.token})">Collect payment</button>` : '';
-  return `<div class="ticket" style="border-top-color:var(--s-${o.status})">
+  const newBadge = unacked ? `<span class="pill pulse" style="color:#fff;background:var(--s-placed)">NEW</span>` : '';
+  const noteLine = o.note ? `<div style="margin-top:6px;font-size:13px;font-weight:600;background:#FBF1DD;color:#7A5410;border-radius:8px;padding:7px 9px">📝 ${esc(o.note)}</div>` : '';
+  const cancelBtn = (o.status !== 'completed') ? `<button class="btn" style="background:transparent;color:#B23B3B;font-size:13px;padding:6px" onclick="event.stopPropagation();kitchenCancel(${o.token})">Cancel order</button>` : '';
+  return `<div class="ticket" style="border-top-color:var(--s-${o.status});${unacked ? 'box-shadow:0 0 0 3px var(--s-placed);' : ''}" onclick="ack(${o.token})">
     <div class="head"><div><div class="tk">#${o.token}</div><div class="meta">Table ${esc(o.table)} · ${mins === 0 ? 'just now' : mins + 'm ago'}</div></div>
-      <div class="badges">${badges}</div></div>
-    <div class="lines">${lines}<div class="amt tabular">${money(o.total)}</div></div>
-    <div class="acts">${advanceBtn}${collectBtn}</div></div>`;
+      <div class="badges">${newBadge}${badges}</div></div>
+    <div class="lines">${lines}${noteLine}<div class="amt tabular">${money(o.total)}</div></div>
+    <div class="acts">${advanceBtn}${collectBtn}${cancelBtn}</div></div>`;
 }
 
 async function advance(token) {
+  K.unacked.delete(token);
   try { const { order } = await api(V('/kitchen/orders/' + token + '/advance'), { method: 'POST', token: K.token }); K.orders.set(order.token, order); renderBoard(); }
   catch (e) { toast(e.message); if (/sign-?in/i.test(e.message)) logout(); }
+}
+async function kitchenCancel(token) {
+  const reason = prompt('Cancel order #' + token + '?\nOptional reason shown to the customer (e.g. "Item out of stock"):');
+  if (reason === null) return; // staff pressed Cancel on the prompt
+  K.unacked.delete(token);
+  try {
+    const { order } = await api(V('/kitchen/orders/' + token + '/cancel'), { method: 'POST', token: K.token, body: { reason: reason.trim() } });
+    K.orders.set(order.token, order); renderBoard();
+    toast(order.paid ? 'Cancelled — customer paid, refund at counter' : 'Order cancelled');
+  } catch (e) { toast(e.message); }
 }
 async function collect(token) {
   try { const { order } = await api(V('/kitchen/orders/' + token + '/collect'), { method: 'POST', token: K.token }); K.orders.set(order.token, order); renderBoard(); toast('Payment collected'); }

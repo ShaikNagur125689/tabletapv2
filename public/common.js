@@ -48,5 +48,6 @@ const STATUS = {
   preparing: { diner: 'Preparing',        color: 'var(--s-preparing)' },
   ready:     { diner: 'Ready for pickup',  color: 'var(--s-ready)' },
   completed: { diner: 'Picked up',         color: 'var(--s-done)' },
+  cancelled: { diner: 'Cancelled',         color: '#D64545' },
 };
 const FLOW = ['placed', 'preparing', 'ready', 'completed'];

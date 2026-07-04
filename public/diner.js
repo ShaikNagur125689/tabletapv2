@@ -4,7 +4,7 @@
 const app = {
   stage: 'menu', venueId: null, table: null, sig: null,
   config: null, menu: [], categories: [], activeCat: null,
-  cart: {}, idemKey: null,
+  cart: {}, idemKey: null, note: '',
   orders: [],            // all known orders for this phone+table, oldest first
   currentToken: null,    // which order the track screen is showing
   payMode: 'now', method: 'online', es: null,
@@ -24,7 +24,7 @@ function forgetToken(t) { writeTokens(readTokens().filter((x) => x !== t)); }
 
 const getOrderLocal = (t) => app.orders.find((o) => o.token === t) || null;
 const currentOrder = () => getOrderLocal(app.currentToken);
-const openOrders = () => app.orders.filter((o) => o.status !== 'completed');
+const openOrders = () => app.orders.filter((o) => o.status !== 'completed' && o.status !== 'cancelled');
 
 function init() {
   const p = new URLSearchParams(location.search);
@@ -160,6 +160,9 @@ function renderCheckout() {
     <div class="note">${icon('clock',18)}<span>${cafe
       ? 'This is a cafe — orders are paid in advance, then prepared.'
       : 'This is a restaurant — order now and settle the bill after your meal, or pay now if you prefer.'}</span></div>`;
+  html += `<div class="field" style="margin-bottom:16px"><label style="display:block;font-size:12px;font-weight:700;color:var(--sub);margin-bottom:5px;text-transform:uppercase;letter-spacing:.05em">Instructions for the kitchen (optional)</label>
+    <textarea id="f-note" maxlength="200" rows="2" placeholder="e.g. less sugar, no onion" oninput="app.note=this.value"
+      style="width:100%;border:1px solid var(--line);border-radius:12px;padding:11px 13px;font-size:15px;font-family:inherit;resize:none">${esc(app.note)}</textarea></div>`;
   if (!cafe) {
     html += `<div class="choice">
       <button class="${app.payMode === 'after' ? 'on' : ''}" onclick="setPayMode('after')">${icon('receipt',18)}<b>Pay after meal</b><small>Settle the bill later</small></button>
@@ -197,9 +200,9 @@ async function placeOrder() {
     const { order } = await api(V('/orders'), { method: 'POST', body: {
       table: app.table, sig: app.sig, lines,
       pay: { mode: cafe ? 'now' : app.payMode, method: app.method },
-      idempotencyKey: app.idemKey,
+      note: app.note, idempotencyKey: app.idemKey,
     }});
-    app.idemKey = null; app.cart = {};
+    app.idemKey = null; app.cart = {}; app.note = '';
     app.orders = app.orders.filter((o) => o.token !== order.token).concat(order);
     rememberToken(order.token);
     app.currentToken = order.token;
@@ -234,7 +237,8 @@ function renderTrack() {
   if (!o) { app.stage = 'menu'; return render(); }
   const curIdx = FLOW.indexOf(o.status);
   const st = STATUS[o.status];
-  const needsSettle = o.timing === 'after' && !o.paid && (o.status === 'ready' || o.status === 'completed');
+  const cancelled = o.status === 'cancelled';
+  const needsSettle = !cancelled && o.timing === 'after' && !o.paid && (o.status === 'ready' || o.status === 'completed');
   const payText = o.paid ? 'Paid' : o.method === 'cash' ? 'Pay cash at counter' : o.timing === 'after' ? 'Settle after your meal' : 'Payment pending';
 
   // chips to switch between this table's orders (only when there are several)
@@ -243,10 +247,11 @@ function renderTrack() {
       app.orders.map((x) => {
         const on = x.token === app.currentToken;
         const done = x.status === 'completed';
+        const canc = x.status === 'cancelled';
         return `<button onclick="switchOrder(${x.token})" class="pill" style="cursor:pointer;flex:0 0 auto;
-          background:${on ? 'var(--ink)' : '#fff'};color:${on ? '#fff' : done ? '#94908A' : 'var(--ink)'};
+          background:${on ? 'var(--ink)' : '#fff'};color:${on ? '#fff' : (done || canc) ? '#94908A' : 'var(--ink)'};
           border:1px solid ${on ? 'var(--ink)' : 'var(--line)'}">
-          #${x.token}${done ? ' ✓' : ''}</button>`;
+          #${x.token}${done ? ' ✓' : ''}${canc ? ' ✕' : ''}</button>`;
       }).join('') + `</div>` : '';
 
   const steps = FLOW.map((s, i) => {
@@ -272,7 +277,12 @@ function renderTrack() {
         <div style="font-size:12px;color:var(--sub);margin-top:8px">${itemsLine}</div>
       </div>
       <div class="perf"><span class="n l"></span><span class="n r"></span><div class="line"></div></div>
-      <div class="steps">${steps}</div>
+      ${cancelled ? `<div style="text-align:center;padding:8px 4px 4px">
+          <div style="font-weight:800;color:#D64545">Order cancelled${o.cancelledBy === 'kitchen' ? ' by the outlet' : ''}</div>
+          ${o.cancelReason ? `<div style="font-size:13px;color:var(--sub);margin-top:4px">Reason: ${esc(o.cancelReason)}</div>` : ''}
+          ${o.paid ? `<div style="font-size:13px;color:var(--sub);margin-top:4px">You already paid — please collect your refund at the counter.</div>` : ''}
+        </div>` : `<div class="steps">${steps}</div>`}
+      ${o.note && !cancelled ? `<div style="font-size:13px;color:var(--sub);border-top:1px dashed var(--line);padding-top:10px;margin-top:2px">Your note: “${esc(o.note)}”</div>` : ''}
     </div>
     <div class="card row-sb" style="padding:16px;margin-top:12px">
       <div style="display:flex;gap:10px;align-items:center">${icon('receipt',18)}
@@ -287,7 +297,10 @@ function renderTrack() {
         <button class="btn btn-brand" onclick="settle('online')">Pay online</button>
         <button class="btn btn-ghost" onclick="settle('cash')">Cash at counter</button></div></div>`;
   }
-  if (o.status === 'completed') {
+  if (o.status === 'placed') {
+    html += `<button class="btn" style="width:100%;margin-top:12px;font-size:14px;color:#B23B3B;background:#FBEAEA;border:1px solid #F0CACA" onclick="cancelOrder(${o.token})">Cancel this order</button>`;
+  }
+  if (o.status === 'completed' || cancelled) {
     html += `<button class="btn btn-ghost" style="width:100%;margin-top:12px;font-size:14px" onclick="dismissOrder(${o.token})">Done with this order — remove it</button>`;
   }
   html += `<p style="text-align:center;font-size:12px;color:var(--sub);margin-top:16px">All your orders are saved to this phone — rescan the table QR anytime to return here.</p>
@@ -301,9 +314,17 @@ async function settle(method) {
     renderTrack(); toast(method === 'online' ? 'Payment received' : 'Please pay cash at the counter');
   } catch (e) { toast(e.message); }
 }
+async function cancelOrder(token) {
+  if (!confirm('Cancel this order?')) return;
+  try {
+    const { order } = await api(V('/orders/' + token + '/cancel'), { method: 'POST', body: { table: app.table, sig: app.sig } });
+    app.orders = app.orders.map((x) => (x.token === order.token ? order : x));
+    renderTrack(); toast(order.paid ? 'Cancelled — collect your refund at the counter' : 'Order cancelled');
+  } catch (e) { toast(e.message); }
+}
 function dismissOrder(token) {
   const o = getOrderLocal(token);
-  if (o && o.status !== 'completed') return; // only completed orders can be dismissed
+  if (o && o.status !== 'completed' && o.status !== 'cancelled') return; // live orders can't be dismissed
   forgetToken(token);
   app.orders = app.orders.filter((x) => x.token !== token);
   if (app.orders.length === 0) { app.currentToken = null; app.stage = 'menu'; return render(); }

@@ -181,13 +181,19 @@ function renderDash() {
         <button class="mi-act" style="color:#B23B3B" onclick="removeItem('${m.id}')">Delete</button>
       </div>`).join('');
 
+  const summaryCard = `
+    <div class="card" style="padding:16px;margin-bottom:14px" id="summaryCard">
+      <div class="row-sb"><p class="section-label" style="margin:0">Today at a glance</p>
+        <button class="mi-act" onclick="loadSummary()">Refresh</button></div>
+      <div id="summaryBody" style="font-size:14px;color:var(--sub);margin-top:8px">Loading…</div>
+    </div>`;
   root().innerHTML = `
   <div class="topbar"><div class="row" style="max-width:680px;margin:0 auto">
     <div><div class="eyebrow">Owner dashboard</div><div class="ttl">${esc(v.name)}</div></div>
     <button class="pill" style="background:#fff;color:var(--brand);cursor:pointer" onclick="logout()">Sign out</button>
   </div></div>
   <div class="admin-wrap" style="padding-top:16px">
-
+    ${summaryCard}
     <div class="card" style="padding:16px;margin-bottom:14px">
       <p class="section-label">Venue settings</p>
       <div class="field"><label>Venue name</label><input id="s-name" value="${esc(v.name)}" maxlength="60" /></div>
@@ -237,6 +243,7 @@ function renderDash() {
     </div>
   </div>`;
 
+  loadSummary();
   if (A.editing) {
     const m = A.menu.find((x) => x.id === A.editing);
     if (m) { $('#i-name').value = m.name; $('#i-price').value = m.price; $('#i-cat').value = m.cat; $('#i-diet').value = m.diet; }
@@ -244,6 +251,15 @@ function renderDash() {
   }
 }
 
+async function loadSummary() {
+  const el = $('#summaryBody'); if (!el) return;
+  try {
+    const midnight = new Date(); midnight.setHours(0, 0, 0, 0);
+    const { summary: s } = await api('/api/owner/summary?since=' + midnight.getTime(), { token: A.token });
+    el.innerHTML = `<b style="color:var(--ink);font-size:17px">${s.orders}</b> orders · <b style="color:var(--ink);font-size:17px">${money(s.revenue)}</b> revenue<br>
+      <span style="font-size:13px">Online ${money(s.paidOnline)} · Cash ${money(s.paidCash)} · Unpaid ${money(s.unpaid)}${s.cancelled ? ` · <span style="color:#B23B3B">${s.cancelled} cancelled</span>` : ''}</span>`;
+  } catch (e) { el.textContent = 'Could not load summary.'; }
+}
 async function saveVenue() {
   try {
     const { venue } = await api('/api/owner/venue', { method: 'PATCH', token: A.token,
