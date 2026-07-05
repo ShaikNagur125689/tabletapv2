@@ -46,6 +46,7 @@ const SCHEMA = [
     status TEXT NOT NULL DEFAULT 'placed',
     timing TEXT NOT NULL, method TEXT, paid INTEGER NOT NULL DEFAULT 0,
     payment_ref TEXT, note TEXT, cancel_reason TEXT, cancelled_by TEXT,
+    refunded INTEGER NOT NULL DEFAULT 0, refunded_at BIGINT,
     placed_at BIGINT NOT NULL, updated_at BIGINT NOT NULL,
     PRIMARY KEY (venue_id, token),
     FOREIGN KEY (venue_id) REFERENCES venues(id)
@@ -82,6 +83,8 @@ if (process.env.DATABASE_URL) {
     'ALTER TABLE orders ADD COLUMN IF NOT EXISTS note TEXT',
     'ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancel_reason TEXT',
     'ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancelled_by TEXT',
+    'ALTER TABLE orders ADD COLUMN IF NOT EXISTS refunded INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE orders ADD COLUMN IF NOT EXISTS refunded_at BIGINT',
   ]) await q.run(s);
   console.log('[db] PostgreSQL connected — data persists across restarts and redeploys.');
 } else {
@@ -104,6 +107,8 @@ if (process.env.DATABASE_URL) {
     'ALTER TABLE orders ADD COLUMN note TEXT',
     'ALTER TABLE orders ADD COLUMN cancel_reason TEXT',
     'ALTER TABLE orders ADD COLUMN cancelled_by TEXT',
+    'ALTER TABLE orders ADD COLUMN refunded INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE orders ADD COLUMN refunded_at BIGINT',
   ]) { try { db.exec(s); } catch (_) {} }
   q = {
     run: async (sql, p = []) => { db.prepare(sql).run(...p); },
@@ -200,6 +205,7 @@ const rowToOrder = (r) => r && ({
   subtotal: Number(r.subtotal), tax: Number(r.tax), total: Number(r.total),
   status: r.status, timing: r.timing, method: r.method, paid: !!Number(r.paid),
   note: r.note || null, cancelReason: r.cancel_reason || null, cancelledBy: r.cancelled_by || null,
+  refunded: !!Number(r.refunded || 0), refundedAt: r.refunded_at ? Number(r.refunded_at) : null,
   placedAt: Number(r.placed_at), updatedAt: Number(r.updated_at),
 });
 export async function createOrder(o) {
@@ -219,9 +225,11 @@ export async function getOrder(venueId, token) {
 export async function updateOrder(venueId, token, patch) {
   const cur = await getOrder(venueId, token); if (!cur) return null;
   const m = { ...cur, ...patch };
-  await q.run(`UPDATE orders SET status = ?, method = ?, paid = ?, cancel_reason = ?, cancelled_by = ?, updated_at = ?
+  await q.run(`UPDATE orders SET status = ?, method = ?, paid = ?, cancel_reason = ?, cancelled_by = ?,
+               refunded = ?, refunded_at = ?, updated_at = ?
                WHERE venue_id = ? AND token = ?`,
-    [m.status, m.method, m.paid ? 1 : 0, m.cancelReason || null, m.cancelledBy || null, Date.now(), venueId, token]);
+    [m.status, m.method, m.paid ? 1 : 0, m.cancelReason || null, m.cancelledBy || null,
+     m.refunded ? 1 : 0, m.refundedAt || null, Date.now(), venueId, token]);
   const saved = await getOrder(venueId, token);
   bus.emit('venue:' + venueId, saved);
   bus.emit('order:' + venueId + ':' + token, saved);

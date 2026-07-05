@@ -260,13 +260,26 @@ app.get('/api/owner/summary', requireOwner, async (req, res, next) => {
     const orders = await DB.listOrdersSince(req.venue.id, since);
     const live = orders.filter((o) => o.status !== 'cancelled');
     const sum = (arr) => arr.reduce((s, o) => s + o.total, 0);
+    const revenue = sum(live);
+    const cancelledOrders = orders.filter((o) => o.status === 'cancelled');
+    const refundsDue = cancelledOrders.filter((o) => o.paid && !o.refunded);
+    const refundsDone = cancelledOrders.filter((o) => o.paid && o.refunded);
+    const itemCounts = {};
+    for (const o of live) for (const it of o.items) itemCounts[it.name] = (itemCounts[it.name] || 0) + it.qty;
+    const topItems = Object.entries(itemCounts).sort((a, b) => b[1] - a[1]).slice(0, 5)
+      .map(([name, qty]) => ({ name, qty }));
     res.json({ summary: {
       orders: live.length,
-      revenue: sum(live),
+      revenue,
+      avgOrder: live.length ? Math.round(revenue / live.length) : 0,
       paidOnline: sum(live.filter((o) => o.paid && o.method === 'online')),
       paidCash: sum(live.filter((o) => o.paid && o.method === 'cash')),
       unpaid: sum(live.filter((o) => !o.paid)),
-      cancelled: orders.length - live.length,
+      cancelled: cancelledOrders.length,
+      refundsDueCount: refundsDue.length,
+      refundsDueAmount: sum(refundsDue),
+      refundsDoneAmount: sum(refundsDone),
+      topItems,
     }});
   } catch (e) { next(e); }
 });
@@ -439,6 +452,20 @@ app.post('/api/venues/:venueId/kitchen/orders/:token/cancel', requireKitchen, as
   } catch (e) { next(e); }
 });
 
+// Kitchen marks a due refund as completed. When Razorpay is integrated,
+// this is where the gateway's refund API gets called first — and 'refunded'
+// only flips after the gateway confirms, making refunds automatic.
+app.post('/api/venues/:venueId/kitchen/orders/:token/refund', requireKitchen, async (req, res, next) => {
+  try {
+    const o = await DB.getOrder(req.params.venueId, Number(req.params.token));
+    if (!o) return res.status(404).json({ error: 'Order not found.' });
+    if (o.status !== 'cancelled' || !o.paid) return res.status(409).json({ error: 'No refund is due on this order.' });
+    if (o.refunded) return res.status(409).json({ error: 'Already refunded.' });
+    const updated = await DB.updateOrder(o.venueId, o.token, { refunded: true, refundedAt: Date.now() });
+    res.json({ order: publicOrder(updated) });
+  } catch (e) { next(e); }
+});
+
 app.post('/api/venues/:venueId/kitchen/orders/:token/collect', requireKitchen, async (req, res, next) => {
   try {
     const o = await DB.getOrder(req.params.venueId, Number(req.params.token));
@@ -484,6 +511,7 @@ function publicOrder(o) {
     subtotal: o.subtotal, tax: o.tax, total: o.total,
     status: o.status, timing: o.timing, method: o.method, paid: o.paid,
     note: o.note || null, cancelReason: o.cancelReason || null, cancelledBy: o.cancelledBy || null,
+    refunded: !!o.refunded, refundedAt: o.refundedAt || null,
     placedAt: o.placedAt, updatedAt: o.updatedAt,
   };
 }
