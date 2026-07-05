@@ -280,7 +280,9 @@ function renderTrack() {
       ${cancelled ? `<div style="text-align:center;padding:8px 4px 4px">
           <div style="font-weight:800;color:#D64545">Order cancelled${o.cancelledBy === 'kitchen' ? ' by the outlet' : ''}</div>
           ${o.cancelReason ? `<div style="font-size:13px;color:var(--sub);margin-top:4px">Reason: ${esc(o.cancelReason)}</div>` : ''}
-          ${o.paid ? `<div style="font-size:13px;color:var(--sub);margin-top:4px">You already paid — please collect your refund at the counter.</div>` : ''}
+          ${o.paid ? (o.refunded
+            ? `<div style="font-size:13px;color:#0E7C57;margin-top:4px;font-weight:600">✓ Your refund has been completed.</div>`
+            : `<div style="font-size:13px;color:var(--sub);margin-top:4px">You already paid — please collect your refund at the counter.</div>`) : ''}
         </div>` : `<div class="steps">${steps}</div>`}
       ${o.note && !cancelled ? `<div style="font-size:13px;color:var(--sub);border-top:1px dashed var(--line);padding-top:10px;margin-top:2px">Your note: “${esc(o.note)}”</div>` : ''}
     </div>

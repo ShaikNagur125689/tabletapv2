@@ -86,8 +86,19 @@ function ack(token) { if (K.unacked.delete(token)) renderBoard(); }
 // created on the sign-in click, so browsers allow it to play.
 let audioCtx = null;
 function initAudio() { try { audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)(); audioCtx.resume(); } catch (_) {} }
+// Browsers only allow sound after a user gesture. Login covers fresh sign-ins,
+// but a SAVED session skips login — so the first tap anywhere unlocks audio too.
+['pointerdown', 'keydown', 'touchstart'].forEach((ev) => document.addEventListener(ev, initAudio, { once: true, capture: true }));
+K.muted = localStorage.getItem('tt_kitchen_muted') === '1';
+function toggleMute() {
+  K.muted = !K.muted;
+  localStorage.setItem('tt_kitchen_muted', K.muted ? '1' : '0');
+  initAudio();
+  if (!K.muted) chime(); // audible confirmation that sound now works
+  renderBoard();
+}
 function chime() {
-  if (!audioCtx) return;
+  if (!audioCtx || K.muted) return;
   try {
     const t0 = audioCtx.currentTime;
     [[880, 0], [1175, 0.18]].forEach(([freq, dt]) => {
@@ -105,7 +116,17 @@ function chime() {
 function renderBoard() {
   const all = [...K.orders.values()].sort((a, b) => a.token - b.token);
   const open = all.filter((o) => o.status !== 'completed');
-  const done = all.filter((o) => o.status === 'completed' || o.status === 'cancelled').slice(-8).reverse();
+  const midnight = new Date(); midnight.setHours(0, 0, 0, 0);
+  const today = all.filter((o) => o.placedAt >= midnight.getTime());
+  const todayLive = today.filter((o) => o.status !== 'cancelled');
+  const refundsDue = all.filter((o) => o.status === 'cancelled' && o.paid && !o.refunded).length;
+  const statsBar = `<div style="display:flex;flex-wrap:wrap;gap:14px;align-items:center;color:#A9A39A;font-size:13px;margin:0 2px 14px">
+    <span><b style="color:var(--paper);font-size:16px">${todayLive.length}</b> orders today</span>
+    <span><b style="color:var(--paper);font-size:16px">${open.length}</b> open now</span>
+    ${today.length - todayLive.length ? `<span style="color:#C97B7B">${today.length - todayLive.length} cancelled</span>` : ''}
+    ${refundsDue ? `<span style="color:#E0A030;font-weight:700">${refundsDue} refund${refundsDue > 1 ? 's' : ''} pending ↓</span>` : ''}
+  </div>`;
+  const done = all.filter((o) => o.status === 'completed' || o.status === 'cancelled').slice(-12).reverse();
 
   let body;
   if (open.length === 0) {
@@ -119,11 +140,9 @@ function renderBoard() {
       return `<div class="col"><h3><span style="width:9px;height:9px;border-radius:50%;background:var(--s-${col.key})"></span>${col.title}<span class="count">${list.length}</span></h3>${cards}</div>`;
     }).join('') + `</div>`;
   }
-  const doneStrip = done.length ? `<div style="margin-top:26px"><div style="font-size:12px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;color:#6E6962;margin:0 2px 8px">Recently completed</div>
-    <div class="done-row">` + done.map((o) => {
-      const canc = o.status === 'cancelled';
-      return `<span class="done-chip" ${canc ? 'style="color:#C97B7B"' : ''}><b ${canc ? 'style="color:#C97B7B"' : ''}>${canc ? '✕ ' : ''}#${o.token}</b> · T${esc(o.table)} · ${money(o.total)}${canc && o.paid ? ' · refund due' : ''}</span>`;
-    }).join('') + `</div></div>` : '';
+  const doneStrip = done.length ? `<div style="margin-top:26px">
+    <div style="font-size:12px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;color:#6E6962;margin:0 2px 10px">Completed &amp; cancelled today</div>
+    <div style="display:grid;grid-template-columns:1fr;gap:8px">` + done.map(historyRow).join('') + `</div></div>` : '';
 
   root().innerHTML = `<div class="kdb">
     <div class="topbar2"><div class="row">
@@ -131,7 +150,7 @@ function renderBoard() {
         <small><span id="liveDot" class="live-dot" style="${K.flash ? 'background:var(--amber)' : ''}"></span> Live kitchen display</small></div></div>
       <button class="exit" onclick="logout()">${icon('store',15)} Sign out</button>
     </div></div>
-    <div class="wrap-wide" style="padding-top:16px;padding-bottom:40px">${body}${doneStrip}</div>
+    <div class="wrap-wide" style="padding-top:16px;padding-bottom:40px">${statsBar}${body}${doneStrip}</div>
   </div>`;
 }
 
@@ -159,6 +178,35 @@ function ticket(o, action) {
     <div class="acts">${advanceBtn}${collectBtn}${cancelBtn}</div></div>`;
 }
 
+function historyRow(o) {
+  const canc = o.status === 'cancelled';
+  const time = new Date(o.placedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const itemsLine = o.items.map((it) => `${it.qty}× ${esc(it.name)}`).join(' · ');
+  const refundDue = canc && o.paid && !o.refunded;
+  const badges = [
+    canc ? `<span class="pill" style="color:#C97B7B;background:#2A1A1A">✕ Cancelled${o.cancelledBy === 'kitchen' ? ' (kitchen)' : ''}</span>`
+         : `<span class="pill" style="color:#7BAF8E;background:#18251D">${icon('check',12,2.6)} Done</span>`,
+    !canc && o.paid ? `<span class="pill" style="color:#7BAF8E;background:#18251D">Paid</span>` : '',
+    !canc && !o.paid ? `<span class="pill" style="color:#C9A35B;background:#2A2114">Unpaid</span>` : '',
+    canc && o.paid && o.refunded ? `<span class="pill" style="color:#7BAF8E;background:#18251D">Refunded</span>` : '',
+    refundDue ? `<span class="pill" style="color:#17130F;background:#E0A030">Refund due</span>` : '',
+  ].join('');
+  return `<div style="background:#1E1812;border-radius:12px;padding:12px 14px;display:flex;flex-wrap:wrap;gap:10px;align-items:center">
+    <div style="min-width:130px"><span style="font-family:var(--mono);font-weight:800;color:#B7B0A4;font-size:16px">#${o.token}</span>
+      <span style="color:#8A8276;font-size:13px"> · T${esc(o.table)} · ${time}</span></div>
+    <div style="flex:1;min-width:160px;color:#A9A39A;font-size:13px">${itemsLine}${o.note ? `<div style="color:#C9A35B">📝 ${esc(o.note)}</div>` : ''}${o.cancelReason ? `<div style="color:#C97B7B">Reason: ${esc(o.cancelReason)}</div>` : ''}</div>
+    <div style="font-weight:800;color:#B7B0A4" class="tabular">${money(o.total)}</div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap">${badges}</div>
+    ${refundDue ? `<button class="btn" style="background:#E0A030;color:#17130F;font-size:13px;padding:8px 12px" onclick="markRefunded(${o.token})">Mark refunded</button>` : ''}
+  </div>`;
+}
+async function markRefunded(token) {
+  if (!confirm('Confirm you have returned the money for order #' + token + '?')) return;
+  try {
+    const { order } = await api(V('/kitchen/orders/' + token + '/refund'), { method: 'POST', token: K.token });
+    K.orders.set(order.token, order); renderBoard(); toast('Refund recorded');
+  } catch (e) { toast(e.message); }
+}
 async function advance(token) {
   K.unacked.delete(token);
   try { const { order } = await api(V('/kitchen/orders/' + token + '/advance'), { method: 'POST', token: K.token }); K.orders.set(order.token, order); renderBoard(); }

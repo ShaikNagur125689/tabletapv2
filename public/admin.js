@@ -256,8 +256,17 @@ async function loadSummary() {
   try {
     const midnight = new Date(); midnight.setHours(0, 0, 0, 0);
     const { summary: s } = await api('/api/owner/summary?since=' + midnight.getTime(), { token: A.token });
-    el.innerHTML = `<b style="color:var(--ink);font-size:17px">${s.orders}</b> orders · <b style="color:var(--ink);font-size:17px">${money(s.revenue)}</b> revenue<br>
-      <span style="font-size:13px">Online ${money(s.paidOnline)} · Cash ${money(s.paidCash)} · Unpaid ${money(s.unpaid)}${s.cancelled ? ` · <span style="color:#B23B3B">${s.cancelled} cancelled</span>` : ''}</span>`;
+    const top = (s.topItems || []).map((t) => `${t.qty}× ${esc(t.name)}`).join(' · ');
+    el.innerHTML = `
+      <div style="display:flex;gap:22px;flex-wrap:wrap;margin-bottom:6px">
+        <span><b style="color:var(--ink);font-size:19px">${s.orders}</b><br><span style="font-size:12px">orders</span></span>
+        <span><b style="color:var(--ink);font-size:19px" class="tabular">${money(s.revenue)}</b><br><span style="font-size:12px">revenue</span></span>
+        <span><b style="color:var(--ink);font-size:19px" class="tabular">${money(s.avgOrder)}</b><br><span style="font-size:12px">avg order</span></span>
+      </div>
+      <div style="font-size:13px">Online ${money(s.paidOnline)} · Cash ${money(s.paidCash)} · Unpaid ${money(s.unpaid)}${s.cancelled ? ` · <span style="color:#B23B3B">${s.cancelled} cancelled</span>` : ''}</div>
+      ${s.refundsDueCount ? `<div style="font-size:13px;color:#9A6312;font-weight:600;margin-top:3px">⚠ ${s.refundsDueCount} refund${s.refundsDueCount > 1 ? 's' : ''} pending (${money(s.refundsDueAmount)})</div>` : ''}
+      ${s.refundsDoneAmount ? `<div style="font-size:13px;margin-top:3px">Refunded today: ${money(s.refundsDoneAmount)}</div>` : ''}
+      ${top ? `<div style="font-size:13px;margin-top:6px;border-top:1px dashed var(--line);padding-top:6px"><b style="color:var(--ink)">Top sellers:</b> ${top}</div>` : ''}`;
   } catch (e) { el.textContent = 'Could not load summary.'; }
 }
 async function saveVenue() {
