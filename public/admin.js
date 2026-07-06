@@ -1,9 +1,10 @@
 // Owner dashboard: sign up / sign in, venue settings, menu management, table QRs.
-const A = { token: null, venue: null, menu: [], authMode: 'login', editing: null, pendingEmail: null };
+const A = { token: null, venue: null, menu: [], authMode: 'login', editing: null, pendingEmail: null, inviteRequired: false };
 const root = () => $('#app');
 
-function boot() {
+async function boot() {
   $('#boot') && ($('#boot').innerHTML = icon('loader', 20));
+  try { A.inviteRequired = (await api('/api/platform/config')).inviteRequired; } catch (_) {}
   A.token = localStorage.getItem('tt_owner');
   if (A.token) loadVenue(); else renderAuth();
 }
@@ -28,6 +29,7 @@ function renderAuth(err = '') {
       <button class="${!login ? 'on' : ''}" onclick="setAuthMode('register')">Create account</button>
     </div>
     ${!login ? `
+    ${A.inviteRequired ? `<div class="field"><label>Invite code</label><input id="f-invite" placeholder="TT-XXXXXX (from the TableTap team)" maxlength="20" style="text-transform:uppercase" /></div>` : ''}
     <div class="field"><label>Your cafe / restaurant name</label><input id="f-venue" placeholder="e.g. Batman Cafe" maxlength="60" /></div>
     <div class="field"><label>Venue type</label><select id="f-mode">
       <option value="cafe">Cafe — diners pay in advance</option>
@@ -49,6 +51,7 @@ async function submitAuth() {
   if (A.authMode === 'register') {
     path = '/api/owners/register';
     body.venueName = $('#f-venue').value; body.mode = $('#f-mode').value;
+    if (A.inviteRequired) body.inviteCode = ($('#f-invite')?.value || '').trim().toUpperCase();
   }
   try {
     const res = await api(path, { method: 'POST', body });
@@ -193,6 +196,8 @@ function renderDash() {
     <button class="pill" style="background:#fff;color:var(--brand);cursor:pointer" onclick="logout()">Sign out</button>
   </div></div>
   <div class="admin-wrap" style="padding-top:16px">
+    ${v.status === 'suspended' ? `<div style="background:#FBEAEA;border:1px solid #F0CACA;color:#8E2B2B;border-radius:14px;padding:14px 16px;margin-bottom:14px;font-size:14px">
+      <b>Your venue is suspended.</b> Diner ordering and the kitchen display are paused. Please contact the TableTap team to reactivate.</div>` : ''}
     ${summaryCard}
     <div class="card" style="padding:16px;margin-bottom:14px">
       <p class="section-label">Venue settings</p>
