@@ -6,6 +6,7 @@ import * as DB from './db.js';
 import {
   hashPassword, verifyPassword, passwordIssue, safeEqual, rateLimit,
   issueOwnerToken, verifyOwnerToken, issueKitchenToken, verifyKitchenToken,
+  issuePlatformToken, verifyPlatformToken,
   signTable, verifyTable,
 } from './auth.js';
 import { sendVerifyCode, sendResetCode } from './email.js';
@@ -52,6 +53,64 @@ function requireKitchen(req, res, next) {
   next();
 }
 
+/* --------------------- platform admin (YOUR business) ------------------- */
+// When PLATFORM_ADMIN_PASSWORD is set, signups require an invite code that
+// only you can generate — so every new cafe goes through you. When it's not
+// set (local development), signup stays open and platform routes are off.
+const PLATFORM_PASSWORD = process.env.PLATFORM_ADMIN_PASSWORD || '';
+const INVITE_REQUIRED = !!PLATFORM_PASSWORD;
+if (!INVITE_REQUIRED) console.warn('[platform] PLATFORM_ADMIN_PASSWORD not set — signups are OPEN and /platform is disabled (dev mode).');
+
+function requirePlatform(req, res, next) {
+  const t = (req.headers.authorization || '').replace(/^Bearer /, '');
+  if (!verifyPlatformToken(t)) return res.status(401).json({ error: 'Platform sign-in required.' });
+  next();
+}
+const venueUnavailable = (res) => res.status(403).json({ error: 'This venue is currently unavailable. Please check with the staff.' });
+
+app.get('/api/platform/config', (req, res) => res.json({ inviteRequired: INVITE_REQUIRED }));
+
+app.post('/api/platform/login', (req, res) => {
+  const rl = rateLimit({ key: 'plat:' + ip(req), limit: 10, windowMs: 600_000 });
+  if (!rl.ok) return res.status(429).json({ error: 'Too many attempts. Wait a bit.' });
+  if (!INVITE_REQUIRED) return res.status(503).json({ error: 'Platform console is disabled — set PLATFORM_ADMIN_PASSWORD.' });
+  if (!safeEqual(String(req.body?.password || ''), PLATFORM_PASSWORD)) return res.status(401).json({ error: 'Wrong password.' });
+  res.json({ token: issuePlatformToken() });
+});
+
+const INVITE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'; // no confusable chars
+function newInviteCode() {
+  let c = '';
+  for (let i = 0; i < 6; i++) c += INVITE_ALPHABET[crypto.randomInt(INVITE_ALPHABET.length)];
+  return 'TT-' + c;
+}
+app.post('/api/platform/invites', requirePlatform, async (req, res, next) => {
+  try { const inv = await DB.createInvite(newInviteCode()); res.status(201).json({ invite: inv }); }
+  catch (e) { next(e); }
+});
+app.get('/api/platform/invites', requirePlatform, async (req, res, next) => {
+  try { res.json({ invites: await DB.listInvites() }); } catch (e) { next(e); }
+});
+app.get('/api/platform/venues', requirePlatform, async (req, res, next) => {
+  try {
+    const venues = await DB.listVenuesWithOwners();
+    const counts = Object.fromEntries((await DB.orderCountsByVenue()).map((r) => [r.venue_id, Number(r.c)]));
+    res.json({ venues: venues.map((v) => ({
+      id: v.id, name: v.name, mode: v.mode, status: v.status,
+      ownerEmail: v.owner_email, createdAt: Number(v.created_at), orders: counts[v.id] || 0,
+    })) });
+  } catch (e) { next(e); }
+});
+app.post('/api/platform/venues/:id/status', requirePlatform, async (req, res, next) => {
+  try {
+    const status = req.body?.status;
+    if (!['active', 'suspended'].includes(status)) return res.status(400).json({ error: 'Status must be active or suspended.' });
+    const v = await DB.setVenueStatus(req.params.id, status);
+    if (!v) return res.status(404).json({ error: 'Venue not found.' });
+    res.json({ venue: { id: v.id, name: v.name, status: v.status } });
+  } catch (e) { next(e); }
+});
+
 /* ------------------------- owner: register/login ----------------------- */
 const newCode = () => String(crypto.randomInt(100000, 1000000));
 const CODE_TTL = 15 * 60 * 1000;
@@ -75,6 +134,14 @@ app.post('/api/owners/register', async (req, res, next) => {
     if (pwErr) return res.status(400).json({ error: pwErr });
     if (venueName.length < 2) return res.status(400).json({ error: 'Enter your cafe/restaurant name.' });
     if (await DB.getOwnerByEmail(email)) return res.status(409).json({ error: 'An account with this email already exists.' });
+    if (INVITE_REQUIRED) {
+      const inviteCode = cleanStr(req.body?.inviteCode, 20).toUpperCase();
+      if (!inviteCode) return res.status(403).json({ error: 'An invite code is required to create a venue. Contact TableTap to get one.' });
+      const inv = await DB.getInvite(inviteCode);
+      if (!inv || inv.used_by) return res.status(403).json({ error: 'That invite code is invalid or already used.' });
+      const consumed = await DB.consumeInvite(inviteCode, email);
+      if (!consumed) return res.status(403).json({ error: 'That invite code is invalid or already used.' });
+    }
 
     const code = newCode();
     const owner = await DB.createOwner(email, hashPassword(password), code, Date.now() + CODE_TTL);
@@ -195,7 +262,7 @@ app.post('/api/owners/login', async (req, res, next) => {
 
 /* --------------------------- owner: dashboard -------------------------- */
 function ownerVenueView(v) {
-  return { id: v.id, name: v.name, mode: v.mode, kitchenPin: v.kitchen_pin };
+  return { id: v.id, name: v.name, mode: v.mode, kitchenPin: v.kitchen_pin, status: v.status };
 }
 app.get('/api/owner/venue', requireOwner, async (req, res, next) => {
   try { res.json({ venue: ownerVenueView(req.venue), menu: await DB.listMenu(req.venue.id) }); }
@@ -296,6 +363,7 @@ app.get('/api/venues/:venueId/config', async (req, res, next) => {
   try {
     const v = await DB.getVenue(req.params.venueId);
     if (!v) return res.status(404).json({ error: 'Venue not found.' });
+    if (v.status === 'suspended') return venueUnavailable(res);
     res.json({ venue: { id: v.id, name: v.name, mode: v.mode }, taxRatePct: TAX_RATE * 100 });
   } catch (e) { next(e); }
 });
@@ -303,6 +371,7 @@ app.get('/api/venues/:venueId/menu', async (req, res, next) => {
   try {
     const v = await DB.getVenue(req.params.venueId);
     if (!v) return res.status(404).json({ error: 'Venue not found.' });
+    if (v.status === 'suspended') return venueUnavailable(res);
     const items = (await DB.listMenu(v.id, true)).map(({ id, name, price, cat, diet }) => ({ id, name, price, cat, diet }));
     res.json({ menu: items, categories: [...new Set(items.map((i) => i.cat))] });
   } catch (e) { next(e); }
@@ -323,6 +392,7 @@ app.post('/api/venues/:venueId/orders', async (req, res, next) => {
     if (!rl.ok) return res.status(429).json({ error: 'Too many orders, slow down a moment.' });
     const venue = await DB.getVenue(req.params.venueId);
     if (!venue) return res.status(404).json({ error: 'Venue not found.' });
+    if (venue.status === 'suspended') return venueUnavailable(res);
 
     const { table, sig, lines, pay, idempotencyKey } = req.body || {};
     const note = cleanStr(req.body?.note, 200) || null;
@@ -420,6 +490,7 @@ app.post('/api/venues/:venueId/kitchen/login', async (req, res, next) => {
     if (!rl.ok) return res.status(429).json({ error: 'Too many attempts. Wait a bit.' });
     const venue = await DB.getVenue(req.params.venueId);
     if (!venue) return res.status(404).json({ error: 'Venue not found.' });
+    if (venue.status === 'suspended') return venueUnavailable(res);
     if (!safeEqual(String(req.body?.pin || ''), venue.kitchen_pin)) {
       return res.status(401).json({ error: 'Wrong PIN.' });
     }
@@ -520,6 +591,7 @@ const page = (f) => (req, res) => res.sendFile(path.join(__dirname, '..', 'publi
 app.get('/order', page('diner.html'));
 app.get('/kitchen', page('kitchen.html'));
 app.get('/admin', page('admin.html'));
+app.get('/platform', page('platform.html'));
 
 // Last-resort error handler: log the real cause, never leak internals.
 app.use((err, req, res, next) => {

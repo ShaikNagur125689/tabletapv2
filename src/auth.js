@@ -65,6 +65,8 @@ export const issueOwnerToken   = (ownerId)  => issue({ role: 'owner', oid: owner
 export const verifyOwnerToken  = (t)        => verify(t, 'owner');
 export const issueKitchenToken = (venueId)  => issue({ role: 'kitchen', vid: venueId }, 60 * 60 * 12);
 export const verifyKitchenToken= (t)        => verify(t, 'kitchen');
+export const issuePlatformToken = ()        => issue({ role: 'platform' }, 60 * 60 * 12);
+export const verifyPlatformToken= (t)       => verify(t, 'platform');
 
 /* ---------------------------- table QR sigs --------------------------- */
 export const signTable   = (venueId, table) => b64u(hmac('table:' + venueId + ':' + table));

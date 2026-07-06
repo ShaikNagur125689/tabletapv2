@@ -29,6 +29,7 @@ const SCHEMA = [
     id TEXT PRIMARY KEY, owner_id TEXT NOT NULL,
     name TEXT NOT NULL, mode TEXT NOT NULL DEFAULT 'cafe',
     kitchen_pin TEXT NOT NULL, token_counter INTEGER NOT NULL DEFAULT 100,
+    status TEXT NOT NULL DEFAULT 'active',
     created_at BIGINT NOT NULL,
     FOREIGN KEY (owner_id) REFERENCES owners(id)
   )`,
@@ -50,6 +51,10 @@ const SCHEMA = [
     placed_at BIGINT NOT NULL, updated_at BIGINT NOT NULL,
     PRIMARY KEY (venue_id, token),
     FOREIGN KEY (venue_id) REFERENCES venues(id)
+  )`,
+  `CREATE TABLE IF NOT EXISTS invites (
+    code TEXT PRIMARY KEY, created_at BIGINT NOT NULL,
+    used_by TEXT, used_at BIGINT
   )`,
   `CREATE INDEX IF NOT EXISTS idx_orders_venue ON orders(venue_id, status)`,
   `CREATE INDEX IF NOT EXISTS idx_menu_venue ON menu_items(venue_id)`,
@@ -85,6 +90,7 @@ if (process.env.DATABASE_URL) {
     'ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancelled_by TEXT',
     'ALTER TABLE orders ADD COLUMN IF NOT EXISTS refunded INTEGER NOT NULL DEFAULT 0',
     'ALTER TABLE orders ADD COLUMN IF NOT EXISTS refunded_at BIGINT',
+    "ALTER TABLE venues ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active'",
   ]) await q.run(s);
   console.log('[db] PostgreSQL connected — data persists across restarts and redeploys.');
 } else {
@@ -109,6 +115,7 @@ if (process.env.DATABASE_URL) {
     'ALTER TABLE orders ADD COLUMN cancelled_by TEXT',
     'ALTER TABLE orders ADD COLUMN refunded INTEGER NOT NULL DEFAULT 0',
     'ALTER TABLE orders ADD COLUMN refunded_at BIGINT',
+    "ALTER TABLE venues ADD COLUMN status TEXT NOT NULL DEFAULT 'active'",
   ]) { try { db.exec(s); } catch (_) {} }
   q = {
     run: async (sql, p = []) => { db.prepare(sql).run(...p); },
@@ -235,6 +242,29 @@ export async function updateOrder(venueId, token, patch) {
   bus.emit('order:' + venueId + ':' + token, saved);
   return saved;
 }
+/* ------------------------- invites & platform -------------------------- */
+export async function createInvite(code) {
+  await q.run('INSERT INTO invites (code, created_at) VALUES (?, ?)', [code, Date.now()]);
+  return { code };
+}
+export const getInvite = (code) => q.get('SELECT * FROM invites WHERE code = ?', [code]);
+export const listInvites = () => q.all('SELECT * FROM invites ORDER BY created_at DESC');
+// Mark-if-unused, then verify who got it — safe against double-spend races.
+export async function consumeInvite(code, email) {
+  await q.run('UPDATE invites SET used_by = ?, used_at = ? WHERE code = ? AND used_by IS NULL', [email, Date.now(), code]);
+  const inv = await getInvite(code);
+  return !!(inv && inv.used_by === email);
+}
+export async function setVenueStatus(id, status) {
+  await q.run('UPDATE venues SET status = ? WHERE id = ?', [status, id]);
+  return getVenue(id);
+}
+export const listVenuesWithOwners = () =>
+  q.all(`SELECT v.id, v.name, v.mode, v.status, v.created_at, o.email AS owner_email
+         FROM venues v JOIN owners o ON o.id = v.owner_id ORDER BY v.created_at DESC`);
+export const orderCountsByVenue = () =>
+  q.all('SELECT venue_id, COUNT(*) AS c FROM orders GROUP BY venue_id');
+
 export async function listOrdersSince(venueId, since) {
   return (await q.all('SELECT * FROM orders WHERE venue_id = ? AND placed_at >= ? ORDER BY token', [venueId, since])).map(rowToOrder);
 }
