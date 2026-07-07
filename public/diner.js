@@ -30,6 +30,10 @@ function init() {
   const p = new URLSearchParams(location.search);
   app.venueId = p.get('v'); app.table = p.get('t'); app.sig = p.get('sig');
   $('#boot') && ($('#boot').innerHTML = icon('loader', 20));
+  if (app.table && app.table.toUpperCase() === 'ANY') {
+    app.common = true; app.table = null;
+    return renderTableEntry();
+  }
   if (!app.venueId || !app.table || !app.sig) {
     root().innerHTML = `<div class="center-load" style="color:var(--sub);flex-direction:column;text-align:center;padding:0 24px">
       <div style="margin-top:80px">${icon('qr', 40)}</div>
@@ -37,6 +41,26 @@ function init() {
       <p style="max-width:300px">Please scan the QR code placed on your table to start ordering.</p></div>`;
     return;
   }
+  load();
+}
+
+function renderTableEntry(err = '') {
+  root().innerHTML = `<div class="wrap" style="padding-top:60px;text-align:center">
+    <div style="color:var(--brand)">${icon('qr', 40)}</div>
+    <h2 class="page" style="margin-top:10px">Which table are you at?</h2>
+    <p style="color:var(--sub);font-size:14px;max-width:280px;margin:0 auto 18px">Enter the table number written on your table (or "counter" for takeaway).</p>
+    <input id="f-table" maxlength="12" placeholder="e.g. 5"
+      style="width:100%;max-width:240px;border:1px solid var(--line);border-radius:14px;padding:14px;font-size:22px;font-weight:800;text-align:center" />
+    <div style="color:#B23B3B;font-size:13px;min-height:20px;margin-top:8px">${esc(err)}</div>
+    <button class="btn btn-brand" style="width:100%;max-width:240px" onclick="confirmTable()">Continue</button>
+  </div>`;
+  const inp = $('#f-table'); inp.focus();
+  inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') confirmTable(); });
+}
+function confirmTable() {
+  const t = $('#f-table').value.trim();
+  if (!/^[A-Za-z0-9-]{1,12}$/.test(t) || t.toUpperCase() === 'ANY') return renderTableEntry('Enter a valid table number (letters/numbers only).');
+  app.table = t;
   load();
 }
 
@@ -83,6 +107,7 @@ function render() {
   if (app.stage === 'track') return renderTrack();
   if (app.stage === 'checkout') return renderCheckout();
   const cafe = app.config.venue.mode === 'cafe';
+  const closed = app.config.storeOpen === false;
   const nOpen = openOrders().length;
 
   let html = `
@@ -94,6 +119,9 @@ function render() {
     <span class="pill" style="background:#fff;color:var(--brand)">${cafe ? 'Pay first' : 'Pay after'}</span>
   </div></div>`;
 
+  if (closed) {
+    html += `<div class="wrap" style="padding-top:12px"><div class="note" style="background:#FBEAEA;color:#8E2B2B">${icon('clock',18)}<span><b>The store is closed right now.</b> You can browse the menu, but ordering is paused until it opens.</span></div></div>`;
+  }
   if (app.menu.length === 0) {
     html += `<div class="center-load" style="color:var(--sub);flex-direction:column"><p>The menu is being set up. Please check with the counter.</p></div>`;
     root().innerHTML = html; return;
@@ -118,7 +146,7 @@ function render() {
       </div></div>`;
   }
 
-  if (cartCount() > 0) {
+  if (cartCount() > 0 && !closed) {
     html += `<div class="dock"><div class="inner">` + (app.stage === 'menu'
       ? `<button class="btn bar btn-ink" onclick="goCart()"><span style="display:flex;gap:8px;align-items:center;font-weight:800">${icon('bag',18)} ${cartCount()} ${cartCount() === 1 ? 'item' : 'items'}</span><span style="display:flex;gap:8px;align-items:center;font-weight:800">${money(totalAmt())} ${icon('arrowR',18)}</span></button>`
       : `<button class="btn bar btn-amber" style="justify-content:center" onclick="goCheckout()">Checkout · ${money(totalAmt())} ${icon('arrowR',18)}</button>`)

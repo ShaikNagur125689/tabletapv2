@@ -190,6 +190,17 @@ function renderDash() {
         <button class="mi-act" onclick="loadSummary()">Refresh</button></div>
       <div id="summaryBody" style="font-size:14px;color:var(--sub);margin-top:8px">Loading…</div>
     </div>`;
+  const openNow = v.storeOpen !== false;
+  const storeCard = `
+    <div class="card" style="padding:16px;margin-bottom:14px;border:2px solid ${openNow ? '#CFE5DF' : '#F0CACA'}">
+      <div class="row-sb">
+        <div><p class="section-label" style="margin:0 0 4px">Store status</p>
+          <b style="font-size:17px;color:${openNow ? '#0E7C57' : '#B23B3B'}">${openNow ? '● Open — accepting orders' : '● Closed — ordering paused'}</b>
+          <div style="font-size:12px;color:var(--sub);margin-top:3px">${openNow ? 'Diners can scan and order right now.' : 'Diners can see the menu but cannot place orders.'}</div></div>
+        <button class="btn ${openNow ? 'btn-ghost' : 'btn-brand'}" style="font-size:14px;padding:11px 16px" onclick="toggleStore(${openNow ? 'false' : 'true'})">
+          ${openNow ? 'Close store' : 'Open store'}</button>
+      </div>
+    </div>`;
   root().innerHTML = `
   <div class="topbar"><div class="row" style="max-width:680px;margin:0 auto">
     <div><div class="eyebrow">Owner dashboard</div><div class="ttl">${esc(v.name)}</div></div>
@@ -198,6 +209,7 @@ function renderDash() {
   <div class="admin-wrap" style="padding-top:16px">
     ${v.status === 'suspended' ? `<div style="background:#FBEAEA;border:1px solid #F0CACA;color:#8E2B2B;border-radius:14px;padding:14px 16px;margin-bottom:14px;font-size:14px">
       <b>Your venue is suspended.</b> Diner ordering and the kitchen display are paused. Please contact the TableTap team to reactivate.</div>` : ''}
+    ${storeCard}
     ${summaryCard}
     <div class="card" style="padding:16px;margin-bottom:14px">
       <p class="section-label">Venue settings</p>
@@ -225,6 +237,7 @@ function renderDash() {
         <input id="t-num" placeholder="Table number (e.g. 5)" maxlength="12" style="flex:1;border:1px solid var(--line);border-radius:12px;padding:11px 13px;font-size:15px" />
         <button class="btn btn-ink" style="padding:10px 16px;font-size:14px" onclick="makeQR()">Generate QR</button>
       </div>
+      <button class="btn btn-ghost" style="width:100%;margin-top:8px;font-size:14px" onclick="makeCommonQR()">Common QR — one code for all tables (diner enters table number)</button>
     </div>
 
     <div class="card" style="margin-bottom:14px;overflow:hidden">
@@ -281,6 +294,19 @@ async function saveVenue() {
     A.venue = venue; toast('Settings saved'); renderDash();
   } catch (e) { toast(e.message); }
 }
+async function toggleStore(open) {
+  try {
+    const { venue } = await api('/api/owner/venue', { method: 'PATCH', token: A.token, body: { storeOpen: open } });
+    A.venue = venue; renderDash();
+    toast(open ? 'Store is now OPEN — orders flowing' : 'Store CLOSED — ordering paused');
+  } catch (e) { toast(e.message); }
+}
+async function makeCommonQR() {
+  try {
+    const { url } = await api('/api/owner/common-link', { token: A.token });
+    showQRModal('All tables', url, 'Diners scan this and enter their table number. Print one for every table or the counter.');
+  } catch (e) { toast(e.message); }
+}
 async function changePin() {
   const pin = prompt('New kitchen PIN (4–8 digits). Staff will use this to sign in:');
   if (pin === null) return;
@@ -326,23 +352,26 @@ async function makeQR() {
   if (!t) return toast('Enter a table number first');
   try {
     const { url, table } = await api('/api/owner/table-link/' + encodeURIComponent(t), { token: A.token });
-    const ov = document.createElement('div');
-    ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;z-index:80;padding:20px';
-    ov.innerHTML = `<div style="background:#fff;border-radius:18px;padding:24px;max-width:340px;width:100%;text-align:center">
-      <div style="font-weight:800;font-size:18px">${esc(A.venue.name)}</div>
-      <div style="font-weight:700;margin-bottom:4px">Table ${esc(table)}</div>
-      <div style="font-size:13px;color:var(--sub);margin-bottom:14px">Print this and place it on the table.</div>
-      <div id="qrbox" style="display:flex;justify-content:center;padding:8px"></div>
-      <div class="copybox" style="margin:12px 0">${esc(url)}</div>
-      <div style="display:flex;gap:8px">
-        <button class="btn btn-ghost" style="flex:1;font-size:14px;padding:10px" onclick="window.print()">Print</button>
-        <button class="btn btn-ink" style="flex:1;font-size:14px;padding:10px" onclick="this.closest('div').parentNode.parentNode.remove()">Close</button>
-      </div></div>`;
-    ov.addEventListener('click', (e) => { if (e.target === ov) ov.remove(); });
-    document.body.appendChild(ov);
-    if (window.QRCode) new QRCode($('#qrbox', ov), { text: url, width: 200, height: 200, colorDark: '#17130F' });
-    else $('#qrbox', ov).innerHTML = '<span style="color:var(--sub);font-size:13px">QR library offline — use the link above.</span>';
+    showQRModal('Table ' + table, url, 'Print this and place it on the table.');
   } catch (e) { toast(e.message); }
+}
+function showQRModal(title, url, subtitle) {
+  const ov = document.createElement('div');
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;z-index:80;padding:20px';
+  ov.innerHTML = `<div style="background:#fff;border-radius:18px;padding:24px;max-width:340px;width:100%;text-align:center">
+    <div style="font-weight:800;font-size:18px">${esc(A.venue.name)}</div>
+    <div style="font-weight:700;margin-bottom:4px">${esc(title)}</div>
+    <div style="font-size:13px;color:var(--sub);margin-bottom:14px">${esc(subtitle)}</div>
+    <div id="qrbox" style="display:flex;justify-content:center;padding:8px"></div>
+    <div class="copybox" style="margin:12px 0">${esc(url)}</div>
+    <div style="display:flex;gap:8px">
+      <button class="btn btn-ghost" style="flex:1;font-size:14px;padding:10px" onclick="window.print()">Print</button>
+      <button class="btn btn-ink" style="flex:1;font-size:14px;padding:10px" onclick="this.closest('div').parentNode.parentNode.remove()">Close</button>
+    </div></div>`;
+  ov.addEventListener('click', (e) => { if (e.target === ov) ov.remove(); });
+  document.body.appendChild(ov);
+  if (window.QRCode) new QRCode($('#qrbox', ov), { text: url, width: 200, height: 200, colorDark: '#17130F' });
+  else $('#qrbox', ov).innerHTML = '<span style="color:var(--sub);font-size:13px">QR library offline — use the link above.</span>';
 }
 
 boot();

@@ -21,9 +21,13 @@ async function open() {
   try {
     const { orders } = await api(V('/kitchen/orders'), { token: K.token });
     const cfg = await api(V('/config'));
-    K.venue = cfg.venue;
+    K.venue = cfg.venue; K.storeOpen = cfg.storeOpen;
     K.orders = new Map(orders.map((o) => [o.token, o]));
+    // Orders that arrived while nobody was signed in must NOT sit silently:
+    // every ticket still in "New" starts nagging until a human acknowledges it.
+    for (const o of orders) if (o.status === 'placed') K.unacked.add(o.token);
     renderBoard(); subscribe();
+    if (K.unacked.size > 0) setTimeout(chime, 400); // audible the moment audio is unlocked
   } catch (e) {
     localStorage.removeItem('tt_kitchen_tok_' + K.venueId); K.token = null;
     renderLogin();
@@ -147,7 +151,8 @@ function renderBoard() {
   root().innerHTML = `<div class="kdb">
     <div class="topbar2"><div class="row">
       <div class="brand2">${icon('chef',22)}<div><div style="font-weight:800;line-height:1.1">${esc(K.venue ? K.venue.name : 'Kitchen')}</div>
-        <small><span id="liveDot" class="live-dot" style="${K.flash ? 'background:var(--amber)' : ''}"></span> Live kitchen display</small></div></div>
+        <small><span id="liveDot" class="live-dot" style="${K.flash ? 'background:var(--amber)' : ''}"></span> Live
+          · <b style="color:${K.storeOpen === false ? '#C97B7B' : '#7BAF8E'}">${K.storeOpen === false ? 'STORE CLOSED' : 'STORE OPEN'}</b></small></div></div>
       <button class="exit" onclick="logout()">${icon('store',15)} Sign out</button>
     </div></div>
     <div class="wrap-wide" style="padding-top:16px;padding-bottom:40px">${statsBar}${body}${doneStrip}</div>
