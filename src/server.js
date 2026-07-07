@@ -262,7 +262,7 @@ app.post('/api/owners/login', async (req, res, next) => {
 
 /* --------------------------- owner: dashboard -------------------------- */
 function ownerVenueView(v) {
-  return { id: v.id, name: v.name, mode: v.mode, kitchenPin: v.kitchen_pin, status: v.status };
+  return { id: v.id, name: v.name, mode: v.mode, kitchenPin: v.kitchen_pin, status: v.status, storeOpen: !!Number(v.store_open) };
 }
 app.get('/api/owner/venue', requireOwner, async (req, res, next) => {
   try { res.json({ venue: ownerVenueView(req.venue), menu: await DB.listMenu(req.venue.id) }); }
@@ -283,6 +283,9 @@ app.patch('/api/owner/venue', requireOwner, async (req, res, next) => {
     if (req.body?.kitchenPin !== undefined) {
       if (!isPin(String(req.body.kitchenPin))) return res.status(400).json({ error: 'PIN must be 4–8 digits.' });
       patch.kitchen_pin = String(req.body.kitchenPin);
+    }
+    if (req.body?.storeOpen !== undefined) {
+      patch.store_open = req.body.storeOpen ? 1 : 0;
     }
     res.json({ venue: ownerVenueView(await DB.updateVenue(req.venue.id, patch)) });
   } catch (e) { next(e); }
@@ -351,6 +354,14 @@ app.get('/api/owner/summary', requireOwner, async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
+// One QR for ALL tables — the diner types their table number after scanning.
+// Weaker guarantee than per-table QRs (the diner claims the table), offered as
+// the venue's choice.
+app.get('/api/owner/common-link', requireOwner, (req, res) => {
+  const base = `${req.protocol}://${req.get('host')}`;
+  res.json({ url: `${base}/order?v=${req.venue.id}&t=ANY&sig=${signTable(req.venue.id, 'ANY')}` });
+});
+
 app.get('/api/owner/table-link/:table', requireOwner, (req, res) => {
   const table = String(req.params.table);
   if (!isTable(table)) return res.status(400).json({ error: 'Table id: letters/numbers only.' });
@@ -364,7 +375,7 @@ app.get('/api/venues/:venueId/config', async (req, res, next) => {
     const v = await DB.getVenue(req.params.venueId);
     if (!v) return res.status(404).json({ error: 'Venue not found.' });
     if (v.status === 'suspended') return venueUnavailable(res);
-    res.json({ venue: { id: v.id, name: v.name, mode: v.mode }, taxRatePct: TAX_RATE * 100 });
+    res.json({ venue: { id: v.id, name: v.name, mode: v.mode }, storeOpen: !!Number(v.store_open), taxRatePct: TAX_RATE * 100 });
   } catch (e) { next(e); }
 });
 app.get('/api/venues/:venueId/menu', async (req, res, next) => {
@@ -393,6 +404,9 @@ app.post('/api/venues/:venueId/orders', async (req, res, next) => {
     const venue = await DB.getVenue(req.params.venueId);
     if (!venue) return res.status(404).json({ error: 'Venue not found.' });
     if (venue.status === 'suspended') return venueUnavailable(res);
+    if (!Number(venue.store_open)) {
+      return res.status(403).json({ error: 'The store is closed right now. Please order when it opens.' });
+    }
 
     const { table, sig, lines, pay, idempotencyKey } = req.body || {};
     const note = cleanStr(req.body?.note, 200) || null;
@@ -401,7 +415,9 @@ app.post('/api/venues/:venueId/orders', async (req, res, next) => {
       const existing = await DB.getOrder(venue.id, idempo.get(ikey));
       if (existing) return res.json({ order: publicOrder(existing) });
     }
-    if (!isTable(String(table)) || !verifyTable(venue.id, String(table), sig)) {
+    const commonSig = verifyTable(venue.id, 'ANY', sig);
+    if (String(table).toUpperCase() === 'ANY' || !isTable(String(table))
+        || !(commonSig || verifyTable(venue.id, String(table), sig))) {
       return res.status(403).json({ error: 'Invalid table code. Please rescan the QR on your table.' });
     }
     if (!Array.isArray(lines) || lines.length === 0 || lines.length > 40) {
@@ -429,12 +445,21 @@ app.post('/api/venues/:venueId/orders', async (req, res, next) => {
       if (!r.ok) return res.status(402).json({ error: 'Payment was declined.' });
       paid = true; paymentRef = r.reference;
     }
-    const order = await DB.createOrder({
-      venueId: venue.id, token: await DB.nextToken(venue.id), table: String(table),
-      items, subtotal, tax, total, status: 'placed',
-      timing: payMode === 'now' ? 'advance' : 'after',
-      method: payMode === 'now' ? method : null, paid, paymentRef, note, placedAt: Date.now(),
-    });
+    let order = null;
+    for (let attempt = 0; attempt < 5 && !order; attempt++) {
+      try {
+        order = await DB.createOrder({
+          venueId: venue.id, token: await DB.nextToken(venue.id), table: String(table),
+          items, subtotal, tax, total, status: 'placed',
+          timing: payMode === 'now' ? 'advance' : 'after',
+          method: payMode === 'now' ? method : null, paid, paymentRef, note, placedAt: Date.now(),
+        });
+      } catch (err) {
+        if (!/unique|duplicate|constraint/i.test(err.message)) throw err; // real error
+        // token collision (e.g. counter reset on a fallback DB) — take the next number
+      }
+    }
+    if (!order) return res.status(500).json({ error: 'Could not assign a token. Please try again.' });
     if (ikey) idempo.set(ikey, order.token);
     res.status(201).json({ order: publicOrder(order) });
   } catch (e) { next(e); }
@@ -471,7 +496,8 @@ app.post('/api/venues/:venueId/orders/:token/cancel', async (req, res, next) => 
     const o = await DB.getOrder(req.params.venueId, Number(req.params.token));
     if (!o) return res.status(404).json({ error: 'Order not found.' });
     const { table, sig } = req.body || {};
-    if (String(table) !== o.table || !verifyTable(req.params.venueId, String(table), sig)) {
+    const commonSig = verifyTable(req.params.venueId, 'ANY', sig);
+    if (String(table) !== o.table || !(commonSig || verifyTable(req.params.venueId, String(table), sig))) {
       return res.status(403).json({ error: 'Invalid table code.' });
     }
     if (o.status === 'cancelled') return res.status(409).json({ error: 'Already cancelled.' });

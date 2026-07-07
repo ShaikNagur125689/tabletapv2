@@ -30,6 +30,7 @@ const SCHEMA = [
     name TEXT NOT NULL, mode TEXT NOT NULL DEFAULT 'cafe',
     kitchen_pin TEXT NOT NULL, token_counter INTEGER NOT NULL DEFAULT 100,
     status TEXT NOT NULL DEFAULT 'active',
+    store_open INTEGER NOT NULL DEFAULT 1,
     created_at BIGINT NOT NULL,
     FOREIGN KEY (owner_id) REFERENCES owners(id)
   )`,
@@ -91,6 +92,7 @@ if (process.env.DATABASE_URL) {
     'ALTER TABLE orders ADD COLUMN IF NOT EXISTS refunded INTEGER NOT NULL DEFAULT 0',
     'ALTER TABLE orders ADD COLUMN IF NOT EXISTS refunded_at BIGINT',
     "ALTER TABLE venues ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active'",
+    'ALTER TABLE venues ADD COLUMN IF NOT EXISTS store_open INTEGER NOT NULL DEFAULT 1',
   ]) await q.run(s);
   console.log('[db] PostgreSQL connected — data persists across restarts and redeploys.');
 } else {
@@ -116,6 +118,7 @@ if (process.env.DATABASE_URL) {
     'ALTER TABLE orders ADD COLUMN refunded INTEGER NOT NULL DEFAULT 0',
     'ALTER TABLE orders ADD COLUMN refunded_at BIGINT',
     "ALTER TABLE venues ADD COLUMN status TEXT NOT NULL DEFAULT 'active'",
+    'ALTER TABLE venues ADD COLUMN store_open INTEGER NOT NULL DEFAULT 1',
   ]) { try { db.exec(s); } catch (_) {} }
   q = {
     run: async (sql, p = []) => { db.prepare(sql).run(...p); },
@@ -170,10 +173,10 @@ export async function createVenue(ownerId, name, mode, kitchenPin) {
 }
 export const getVenue = (id) => q.get('SELECT * FROM venues WHERE id = ?', [id]);
 export const getVenueByOwner = (ownerId) => q.get('SELECT * FROM venues WHERE owner_id = ?', [ownerId]);
-export async function updateVenue(id, { name, mode, kitchen_pin }) {
+export async function updateVenue(id, { name, mode, kitchen_pin, store_open }) {
   const v = await getVenue(id); if (!v) return null;
-  await q.run('UPDATE venues SET name = ?, mode = ?, kitchen_pin = ? WHERE id = ?',
-    [name ?? v.name, mode ?? v.mode, kitchen_pin ?? v.kitchen_pin, id]);
+  await q.run('UPDATE venues SET name = ?, mode = ?, kitchen_pin = ?, store_open = ? WHERE id = ?',
+    [name ?? v.name, mode ?? v.mode, kitchen_pin ?? v.kitchen_pin, store_open ?? v.store_open, id]);
   return getVenue(id);
 }
 // RETURNING makes increment+read one atomic statement, so two simultaneous
