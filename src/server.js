@@ -10,6 +10,7 @@ import {
   signTable, verifyTable,
 } from './auth.js';
 import { sendVerifyCode, sendResetCode } from './email.js';
+import { upiDirectLink, phonepeConfigured, ppCreatePayment, ppCheckStatus, ppVerifyWebhookAuth } from './payments.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -262,7 +263,11 @@ app.post('/api/owners/login', async (req, res, next) => {
 
 /* --------------------------- owner: dashboard -------------------------- */
 function ownerVenueView(v) {
-  return { id: v.id, name: v.name, mode: v.mode, kitchenPin: v.kitchen_pin, status: v.status, storeOpen: !!Number(v.store_open) };
+  return { id: v.id, name: v.name, mode: v.mode, kitchenPin: v.kitchen_pin, status: v.status, storeOpen: !!Number(v.store_open),
+    payMode: v.pay_mode || 'simulated', upiVpa: v.upi_vpa || '',
+    phonepe: { clientId: v.pp_client_id || '', clientVersion: v.pp_client_version || '',
+      env: v.pp_env || 'sandbox', webhookUser: v.pp_webhook_user || '',
+      hasSecret: !!v.pp_client_secret, hasWebhookPass: !!v.pp_webhook_pass } };
 }
 app.get('/api/owner/venue', requireOwner, async (req, res, next) => {
   try { res.json({ venue: ownerVenueView(req.venue), menu: await DB.listMenu(req.venue.id) }); }
@@ -287,6 +292,41 @@ app.patch('/api/owner/venue', requireOwner, async (req, res, next) => {
     if (req.body?.storeOpen !== undefined) {
       patch.store_open = req.body.storeOpen ? 1 : 0;
     }
+    res.json({ venue: ownerVenueView(await DB.updateVenue(req.venue.id, patch)) });
+  } catch (e) { next(e); }
+});
+
+// Per-venue payment configuration. The three lanes:
+//   simulated (demo) / upi_direct (venue's own UPI ID, staff-verified, ₹0)
+//   / phonepe (venue's own PhonePe PG account, auto-verified)
+app.patch('/api/owner/payments', requireOwner, async (req, res, next) => {
+  try {
+    const b = req.body || {};
+    const patch = {};
+    if (b.payMode !== undefined) {
+      if (!['simulated', 'upi_direct', 'phonepe'].includes(b.payMode)) return res.status(400).json({ error: 'Bad payment mode.' });
+      patch.pay_mode = b.payMode;
+    }
+    if (b.upiVpa !== undefined) {
+      const vpa = cleanStr(b.upiVpa, 80);
+      if (vpa && !/^[\w.\-]{2,}@[a-zA-Z]{2,}$/.test(vpa)) return res.status(400).json({ error: 'That does not look like a UPI ID (e.g. name@okhdfcbank).' });
+      patch.upi_vpa = vpa || null;
+    }
+    if (b.phonepe && typeof b.phonepe === 'object') {
+      const p = b.phonepe;
+      if (p.clientId !== undefined) patch.pp_client_id = cleanStr(p.clientId, 120) || null;
+      if (p.clientSecret) patch.pp_client_secret = cleanStr(p.clientSecret, 200); // only overwrite when provided
+      if (p.clientVersion !== undefined) patch.pp_client_version = cleanStr(p.clientVersion, 10) || null;
+      if (p.env !== undefined) {
+        if (!['sandbox', 'prod'].includes(p.env)) return res.status(400).json({ error: 'PhonePe env must be sandbox or prod.' });
+        patch.pp_env = p.env;
+      }
+      if (p.webhookUser !== undefined) patch.pp_webhook_user = cleanStr(p.webhookUser, 80) || null;
+      if (p.webhookPass) patch.pp_webhook_pass = cleanStr(p.webhookPass, 120);
+    }
+    const mode = patch.pay_mode || req.venue.pay_mode;
+    const vpaAfter = patch.upi_vpa !== undefined ? patch.upi_vpa : req.venue.upi_vpa;
+    if (mode === 'upi_direct' && !vpaAfter) return res.status(400).json({ error: 'UPI Direct needs the venue UPI ID.' });
     res.json({ venue: ownerVenueView(await DB.updateVenue(req.venue.id, patch)) });
   } catch (e) { next(e); }
 });
@@ -375,7 +415,10 @@ app.get('/api/venues/:venueId/config', async (req, res, next) => {
     const v = await DB.getVenue(req.params.venueId);
     if (!v) return res.status(404).json({ error: 'Venue not found.' });
     if (v.status === 'suspended') return venueUnavailable(res);
-    res.json({ venue: { id: v.id, name: v.name, mode: v.mode }, storeOpen: !!Number(v.store_open), taxRatePct: TAX_RATE * 100 });
+    const payMode = v.pay_mode || 'simulated';
+    const onlineReady = payMode === 'simulated' || (payMode === 'upi_direct' && !!v.upi_vpa) || (payMode === 'phonepe' && phonepeConfigured(v));
+    res.json({ venue: { id: v.id, name: v.name, mode: v.mode }, storeOpen: !!Number(v.store_open),
+      payMode, onlineReady, upiVpa: payMode === 'upi_direct' ? (v.upi_vpa || null) : null, taxRatePct: TAX_RATE * 100 });
   } catch (e) { next(e); }
 });
 app.get('/api/venues/:venueId/menu', async (req, res, next) => {
@@ -439,11 +482,21 @@ app.post('/api/venues/:venueId/orders', async (req, res, next) => {
 
     const payMode = venue.mode === 'cafe' ? 'now' : (pay?.mode === 'now' ? 'now' : 'after');
     const method = pay?.method === 'cash' ? 'cash' : 'online';
-    let paid = false, paymentRef = null;
+    const lane = venue.pay_mode || 'simulated'; // simulated | upi_direct | phonepe
+    let paid = false, paymentRef = null, paymentState = null, payProvider = null;
     if (payMode === 'now' && method === 'online') {
-      const r = await simulatedGatewayCharge(total);
-      if (!r.ok) return res.status(402).json({ error: 'Payment was declined.' });
-      paid = true; paymentRef = r.reference;
+      payProvider = lane;
+      if (lane === 'simulated') {
+        const r = await simulatedGatewayCharge(total);
+        if (!r.ok) return res.status(402).json({ error: 'Payment was declined.' });
+        paid = true; paymentRef = r.reference;
+      } else if (lane === 'upi_direct') {
+        if (!venue.upi_vpa) return res.status(409).json({ error: 'This venue has not set up UPI payments — please pay cash.' });
+        paymentState = 'awaiting_payment'; // diner pays the venue VPA, staff verify
+      } else if (lane === 'phonepe') {
+        if (!phonepeConfigured(venue)) return res.status(409).json({ error: 'Online payment is not configured for this venue — please pay cash.' });
+        paymentState = 'awaiting_payment'; // gateway session created right after insert
+      }
     }
     let order = null;
     for (let attempt = 0; attempt < 5 && !order; attempt++) {
@@ -452,7 +505,8 @@ app.post('/api/venues/:venueId/orders', async (req, res, next) => {
           venueId: venue.id, token: await DB.nextToken(venue.id), table: String(table),
           items, subtotal, tax, total, status: 'placed',
           timing: payMode === 'now' ? 'advance' : 'after',
-          method: payMode === 'now' ? method : null, paid, paymentRef, note, placedAt: Date.now(),
+          method: payMode === 'now' ? method : null, paid, paymentRef, note,
+          paymentState, payProvider, placedAt: Date.now(),
         });
       } catch (err) {
         if (!/unique|duplicate|constraint/i.test(err.message)) throw err; // real error
@@ -461,7 +515,24 @@ app.post('/api/venues/:venueId/orders', async (req, res, next) => {
     }
     if (!order) return res.status(500).json({ error: 'Could not assign a token. Please try again.' });
     if (ikey) idempo.set(ikey, order.token);
-    res.status(201).json({ order: publicOrder(order) });
+
+    // Lane-specific payment payload for the diner UI.
+    let payment = null;
+    if (order.paymentState === 'awaiting_payment' && lane === 'upi_direct') {
+      payment = { kind: 'upi_direct', upiLink: upiDirectLink(venue, order), vpa: venue.upi_vpa, amount: order.total };
+    } else if (order.paymentState === 'awaiting_payment' && lane === 'phonepe') {
+      try {
+        const returnUrl = `${req.protocol}://${req.get('host')}/order?v=${venue.id}&t=${encodeURIComponent(order.table)}&sig=${encodeURIComponent(sig)}&paid=${order.token}`;
+        const { redirectUrl, merchantOrderId } = await ppCreatePayment(venue, order, returnUrl);
+        order = await DB.updateOrder(order.venueId, order.token, { paymentRef: merchantOrderId });
+        payment = { kind: 'phonepe', paymentUrl: redirectUrl };
+      } catch (err) {
+        console.error('[phonepe] create failed:', err.message);
+        order = await DB.updateOrder(order.venueId, order.token, { paymentState: 'gateway_error' });
+        payment = { kind: 'error', error: 'Could not start online payment — you can pay cash at the counter.' };
+      }
+    }
+    res.status(201).json({ order: publicOrder(order), payment });
   } catch (e) { next(e); }
 });
 
@@ -480,11 +551,95 @@ app.post('/api/venues/:venueId/orders/:token/settle', async (req, res, next) => 
     if (o.status === 'cancelled' || o.timing !== 'after' || o.paid) return res.status(409).json({ error: 'Nothing to settle.' });
     const method = req.body?.method === 'cash' ? 'cash' : 'online';
     if (method === 'online') {
-      const r = await simulatedGatewayCharge(o.total);
-      if (!r.ok) return res.status(402).json({ error: 'Payment was declined.' });
-      return res.json({ order: publicOrder(await DB.updateOrder(o.venueId, o.token, { method, paid: true })) });
+      const venue = await DB.getVenue(o.venueId);
+      const lane = venue.pay_mode || 'simulated';
+      if (lane === 'simulated') {
+        const r = await simulatedGatewayCharge(o.total);
+        if (!r.ok) return res.status(402).json({ error: 'Payment was declined.' });
+        return res.json({ order: publicOrder(await DB.updateOrder(o.venueId, o.token, { method, paid: true, payProvider: lane })) });
+      }
+      if (lane === 'upi_direct') {
+        if (!venue.upi_vpa) return res.status(409).json({ error: 'This venue has not set up UPI — please pay cash.' });
+        const updated = await DB.updateOrder(o.venueId, o.token, { method, payProvider: lane, paymentState: 'awaiting_payment' });
+        return res.json({ order: publicOrder(updated),
+          payment: { kind: 'upi_direct', upiLink: upiDirectLink(venue, updated), vpa: venue.upi_vpa, amount: updated.total } });
+      }
+      if (lane === 'phonepe') {
+        if (!phonepeConfigured(venue)) return res.status(409).json({ error: 'Online payment is not configured — please pay cash.' });
+        try {
+          const returnUrl = `${req.protocol}://${req.get('host')}/order?v=${venue.id}&t=${encodeURIComponent(o.table)}&paid=${o.token}`;
+          const { redirectUrl, merchantOrderId } = await ppCreatePayment(venue, o, returnUrl);
+          const updated = await DB.updateOrder(o.venueId, o.token, { method, payProvider: lane, paymentState: 'awaiting_payment', paymentRef: merchantOrderId });
+          return res.json({ order: publicOrder(updated), payment: { kind: 'phonepe', paymentUrl: redirectUrl } });
+        } catch (err) {
+          console.error('[phonepe] settle create failed:', err.message);
+          return res.status(502).json({ error: 'Could not start online payment — you can pay cash at the counter.' });
+        }
+      }
     }
     res.json({ order: publicOrder(await DB.updateOrder(o.venueId, o.token, { method, paid: false })) });
+  } catch (e) { next(e); }
+});
+
+// Diner says "I've paid via UPI". This NEVER marks paid — it flags the ticket
+// for staff to verify against their UPI app / soundbox and confirm with a tap.
+app.post('/api/venues/:venueId/orders/:token/upi-claimed', async (req, res, next) => {
+  try {
+    const o = await DB.getOrder(req.params.venueId, Number(req.params.token));
+    if (!o) return res.status(404).json({ error: 'Order not found.' });
+    const { table, sig } = req.body || {};
+    const commonSig = verifyTable(req.params.venueId, 'ANY', sig);
+    if (String(table) !== o.table || !(commonSig || verifyTable(req.params.venueId, String(table), sig))) {
+      return res.status(403).json({ error: 'Invalid table code.' });
+    }
+    if (o.paid || o.payProvider !== 'upi_direct' || o.status === 'cancelled') {
+      return res.status(409).json({ error: 'Nothing to claim on this order.' });
+    }
+    const updated = await DB.updateOrder(o.venueId, o.token, { paymentState: 'claimed' });
+    res.json({ order: publicOrder(updated) });
+  } catch (e) { next(e); }
+});
+
+// Diner tracking polls this for gateway orders. The server asks PhonePe's
+// Check-Status API directly — the authoritative source — and flips paid.
+app.get('/api/venues/:venueId/orders/:token/payment-status', async (req, res, next) => {
+  try {
+    let o = await DB.getOrder(req.params.venueId, Number(req.params.token));
+    if (!o) return res.status(404).json({ error: 'Order not found.' });
+    if (!o.paid && o.payProvider === 'phonepe' && o.paymentRef && o.paymentState === 'awaiting_payment') {
+      const venue = await DB.getVenue(o.venueId);
+      try {
+        const state = await ppCheckStatus(venue, o.paymentRef);
+        if (state === 'COMPLETED') o = await DB.updateOrder(o.venueId, o.token, { paid: true, paymentState: 'confirmed' });
+        else if (state === 'FAILED') o = await DB.updateOrder(o.venueId, o.token, { paymentState: 'failed' });
+      } catch (err) { console.error('[phonepe] status check failed:', err.message); }
+    }
+    res.json({ order: publicOrder(o) });
+  } catch (e) { next(e); }
+});
+
+// PhonePe server-to-server webhook (configure this URL per venue in the
+// PhonePe dashboard): https://<host>/api/payments/phonepe/webhook/<venueId>
+app.post('/api/payments/phonepe/webhook/:venueId', async (req, res, next) => {
+  try {
+    const venue = await DB.getVenue(req.params.venueId);
+    if (!venue) return res.status(404).end();
+    if (!ppVerifyWebhookAuth(venue, req.headers.authorization)) {
+      console.warn('[phonepe] webhook auth failed for venue', venue.id);
+      return res.status(401).end();
+    }
+    const payload = req.body?.payload || req.body || {};
+    const merchantOrderId = payload.merchantOrderId || payload.orderId || null;
+    if (merchantOrderId) {
+      const o = await DB.getOrderByPaymentRef(venue.id, merchantOrderId);
+      if (o && !o.paid) {
+        // Webhook is the trigger; Check-Status is the confirmation.
+        const state = await ppCheckStatus(venue, merchantOrderId).catch(() => 'PENDING');
+        if (state === 'COMPLETED') await DB.updateOrder(o.venueId, o.token, { paid: true, paymentState: 'confirmed' });
+        else if (state === 'FAILED') await DB.updateOrder(o.venueId, o.token, { paymentState: 'failed' });
+      }
+    }
+    res.json({ ok: true }); // always ack so PhonePe stops retrying
   } catch (e) { next(e); }
 });
 
@@ -568,7 +723,8 @@ app.post('/api/venues/:venueId/kitchen/orders/:token/collect', requireKitchen, a
     const o = await DB.getOrder(req.params.venueId, Number(req.params.token));
     if (!o) return res.status(404).json({ error: 'Order not found.' });
     if (o.paid) return res.status(409).json({ error: 'Already paid.' });
-    res.json({ order: publicOrder(await DB.updateOrder(o.venueId, o.token, { paid: true, method: o.method || 'cash' })) });
+    const method = req.body?.method === 'upi' ? 'upi' : (o.method || 'cash');
+    res.json({ order: publicOrder(await DB.updateOrder(o.venueId, o.token, { paid: true, method, paymentState: 'confirmed' })) });
   } catch (e) { next(e); }
 });
 
@@ -609,6 +765,7 @@ function publicOrder(o) {
     status: o.status, timing: o.timing, method: o.method, paid: o.paid,
     note: o.note || null, cancelReason: o.cancelReason || null, cancelledBy: o.cancelledBy || null,
     refunded: !!o.refunded, refundedAt: o.refundedAt || null,
+    paymentState: o.paymentState || null, payProvider: o.payProvider || null,
     placedAt: o.placedAt, updatedAt: o.updatedAt,
   };
 }

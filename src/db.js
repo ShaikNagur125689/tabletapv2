@@ -31,6 +31,10 @@ const SCHEMA = [
     kitchen_pin TEXT NOT NULL, token_counter INTEGER NOT NULL DEFAULT 100,
     status TEXT NOT NULL DEFAULT 'active',
     store_open INTEGER NOT NULL DEFAULT 1,
+    pay_mode TEXT NOT NULL DEFAULT 'simulated',
+    upi_vpa TEXT,
+    pp_client_id TEXT, pp_client_secret TEXT, pp_client_version TEXT,
+    pp_env TEXT, pp_webhook_user TEXT, pp_webhook_pass TEXT,
     created_at BIGINT NOT NULL,
     FOREIGN KEY (owner_id) REFERENCES owners(id)
   )`,
@@ -49,6 +53,7 @@ const SCHEMA = [
     timing TEXT NOT NULL, method TEXT, paid INTEGER NOT NULL DEFAULT 0,
     payment_ref TEXT, note TEXT, cancel_reason TEXT, cancelled_by TEXT,
     refunded INTEGER NOT NULL DEFAULT 0, refunded_at BIGINT,
+    payment_state TEXT, pay_provider TEXT,
     placed_at BIGINT NOT NULL, updated_at BIGINT NOT NULL,
     PRIMARY KEY (venue_id, token),
     FOREIGN KEY (venue_id) REFERENCES venues(id)
@@ -93,6 +98,16 @@ if (process.env.DATABASE_URL) {
     'ALTER TABLE orders ADD COLUMN IF NOT EXISTS refunded_at BIGINT',
     "ALTER TABLE venues ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active'",
     'ALTER TABLE venues ADD COLUMN IF NOT EXISTS store_open INTEGER NOT NULL DEFAULT 1',
+    "ALTER TABLE venues ADD COLUMN IF NOT EXISTS pay_mode TEXT NOT NULL DEFAULT 'simulated'",
+    'ALTER TABLE venues ADD COLUMN IF NOT EXISTS upi_vpa TEXT',
+    'ALTER TABLE venues ADD COLUMN IF NOT EXISTS pp_client_id TEXT',
+    'ALTER TABLE venues ADD COLUMN IF NOT EXISTS pp_client_secret TEXT',
+    'ALTER TABLE venues ADD COLUMN IF NOT EXISTS pp_client_version TEXT',
+    'ALTER TABLE venues ADD COLUMN IF NOT EXISTS pp_env TEXT',
+    'ALTER TABLE venues ADD COLUMN IF NOT EXISTS pp_webhook_user TEXT',
+    'ALTER TABLE venues ADD COLUMN IF NOT EXISTS pp_webhook_pass TEXT',
+    "ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_state TEXT",
+    "ALTER TABLE orders ADD COLUMN IF NOT EXISTS pay_provider TEXT",
   ]) await q.run(s);
   console.log('[db] PostgreSQL connected — data persists across restarts and redeploys.');
 } else {
@@ -119,6 +134,16 @@ if (process.env.DATABASE_URL) {
     'ALTER TABLE orders ADD COLUMN refunded_at BIGINT',
     "ALTER TABLE venues ADD COLUMN status TEXT NOT NULL DEFAULT 'active'",
     'ALTER TABLE venues ADD COLUMN store_open INTEGER NOT NULL DEFAULT 1',
+    "ALTER TABLE venues ADD COLUMN pay_mode TEXT NOT NULL DEFAULT 'simulated'",
+    'ALTER TABLE venues ADD COLUMN upi_vpa TEXT',
+    'ALTER TABLE venues ADD COLUMN pp_client_id TEXT',
+    'ALTER TABLE venues ADD COLUMN pp_client_secret TEXT',
+    'ALTER TABLE venues ADD COLUMN pp_client_version TEXT',
+    'ALTER TABLE venues ADD COLUMN pp_env TEXT',
+    'ALTER TABLE venues ADD COLUMN pp_webhook_user TEXT',
+    'ALTER TABLE venues ADD COLUMN pp_webhook_pass TEXT',
+    'ALTER TABLE orders ADD COLUMN payment_state TEXT',
+    'ALTER TABLE orders ADD COLUMN pay_provider TEXT',
   ]) { try { db.exec(s); } catch (_) {} }
   q = {
     run: async (sql, p = []) => { db.prepare(sql).run(...p); },
@@ -173,10 +198,15 @@ export async function createVenue(ownerId, name, mode, kitchenPin) {
 }
 export const getVenue = (id) => q.get('SELECT * FROM venues WHERE id = ?', [id]);
 export const getVenueByOwner = (ownerId) => q.get('SELECT * FROM venues WHERE owner_id = ?', [ownerId]);
-export async function updateVenue(id, { name, mode, kitchen_pin, store_open }) {
+export async function updateVenue(id, patch) {
   const v = await getVenue(id); if (!v) return null;
-  await q.run('UPDATE venues SET name = ?, mode = ?, kitchen_pin = ?, store_open = ? WHERE id = ?',
-    [name ?? v.name, mode ?? v.mode, kitchen_pin ?? v.kitchen_pin, store_open ?? v.store_open, id]);
+  const f = (key) => patch[key] ?? v[key];
+  await q.run(`UPDATE venues SET name = ?, mode = ?, kitchen_pin = ?, store_open = ?,
+      pay_mode = ?, upi_vpa = ?, pp_client_id = ?, pp_client_secret = ?, pp_client_version = ?,
+      pp_env = ?, pp_webhook_user = ?, pp_webhook_pass = ? WHERE id = ?`,
+    [f('name'), f('mode'), f('kitchen_pin'), f('store_open'),
+     f('pay_mode'), f('upi_vpa'), f('pp_client_id'), f('pp_client_secret'), f('pp_client_version'),
+     f('pp_env'), f('pp_webhook_user'), f('pp_webhook_pass'), id]);
   return getVenue(id);
 }
 // RETURNING makes increment+read one atomic statement, so two simultaneous
@@ -216,14 +246,16 @@ const rowToOrder = (r) => r && ({
   status: r.status, timing: r.timing, method: r.method, paid: !!Number(r.paid),
   note: r.note || null, cancelReason: r.cancel_reason || null, cancelledBy: r.cancelled_by || null,
   refunded: !!Number(r.refunded || 0), refundedAt: r.refunded_at ? Number(r.refunded_at) : null,
+  paymentState: r.payment_state || null, payProvider: r.pay_provider || null, paymentRef: r.payment_ref || null,
   placedAt: Number(r.placed_at), updatedAt: Number(r.updated_at),
 });
 export async function createOrder(o) {
   await q.run(`INSERT INTO orders (venue_id, token, table_id, items_json, subtotal, tax, total,
-      status, timing, method, paid, payment_ref, note, placed_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      status, timing, method, paid, payment_ref, note, payment_state, pay_provider, placed_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [o.venueId, o.token, o.table, JSON.stringify(o.items), o.subtotal, o.tax, o.total,
-     o.status, o.timing, o.method, o.paid ? 1 : 0, o.paymentRef || null, o.note || null, o.placedAt, o.placedAt]);
+     o.status, o.timing, o.method, o.paid ? 1 : 0, o.paymentRef || null, o.note || null,
+     o.paymentState || null, o.payProvider || null, o.placedAt, o.placedAt]);
   const saved = await getOrder(o.venueId, o.token);
   bus.emit('venue:' + o.venueId, saved);
   bus.emit('order:' + o.venueId + ':' + o.token, saved);
@@ -236,10 +268,10 @@ export async function updateOrder(venueId, token, patch) {
   const cur = await getOrder(venueId, token); if (!cur) return null;
   const m = { ...cur, ...patch };
   await q.run(`UPDATE orders SET status = ?, method = ?, paid = ?, cancel_reason = ?, cancelled_by = ?,
-               refunded = ?, refunded_at = ?, updated_at = ?
+               refunded = ?, refunded_at = ?, payment_state = ?, payment_ref = ?, updated_at = ?
                WHERE venue_id = ? AND token = ?`,
     [m.status, m.method, m.paid ? 1 : 0, m.cancelReason || null, m.cancelledBy || null,
-     m.refunded ? 1 : 0, m.refundedAt || null, Date.now(), venueId, token]);
+     m.refunded ? 1 : 0, m.refundedAt || null, m.paymentState || null, m.paymentRef || null, Date.now(), venueId, token]);
   const saved = await getOrder(venueId, token);
   bus.emit('venue:' + venueId, saved);
   bus.emit('order:' + venueId + ':' + token, saved);
@@ -268,6 +300,9 @@ export const listVenuesWithOwners = () =>
 export const orderCountsByVenue = () =>
   q.all('SELECT venue_id, COUNT(*) AS c FROM orders GROUP BY venue_id');
 
+export async function getOrderByPaymentRef(venueId, ref) {
+  return rowToOrder(await q.get('SELECT * FROM orders WHERE venue_id = ? AND payment_ref = ?', [venueId, ref]));
+}
 export async function listOrdersSince(venueId, since) {
   return (await q.all('SELECT * FROM orders WHERE venue_id = ? AND placed_at >= ? ORDER BY token', [venueId, since])).map(rowToOrder);
 }
