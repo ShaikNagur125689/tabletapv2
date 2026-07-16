@@ -221,6 +221,18 @@ function renderDash() {
     </div>
 
     <div class="card" style="padding:16px;margin-bottom:14px">
+      <p class="section-label">Payments</p>
+      <div style="font-size:13px;color:var(--sub);margin-bottom:10px">How diners pay when they choose "online".</div>
+      <select id="p-mode" style="width:100%;border:1px solid var(--line);border-radius:12px;padding:11px 13px;font-size:15px;background:#fff" onchange="renderPayFields()">
+        <option value="simulated" ${v.payMode === 'simulated' ? 'selected' : ''}>Simulated (demo only — fake success)</option>
+        <option value="upi_direct" ${v.payMode === 'upi_direct' ? 'selected' : ''}>UPI Direct — your UPI ID, ₹0 fees, staff verifies</option>
+        <option value="phonepe" ${v.payMode === 'phonepe' ? 'selected' : ''}>PhonePe Gateway — auto-verified, your PhonePe PG account</option>
+      </select>
+      <div id="payFields" style="margin-top:10px"></div>
+      <button class="btn btn-ink" style="width:100%;margin-top:10px;font-size:14px" onclick="savePayments()">Save payment settings</button>
+    </div>
+
+    <div class="card" style="padding:16px;margin-bottom:14px">
       <p class="section-label">Kitchen access</p>
       <div class="row-sb">
         <div><div style="font-size:13px;color:var(--sub)">Staff sign in at the kitchen page with this PIN</div>
@@ -262,6 +274,7 @@ function renderDash() {
   </div>`;
 
   loadSummary();
+  renderPayFields();
   if (A.editing) {
     const m = A.menu.find((x) => x.id === A.editing);
     if (m) { $('#i-name').value = m.name; $('#i-price').value = m.price; $('#i-cat').value = m.cat; $('#i-diet').value = m.diet; }
@@ -292,6 +305,46 @@ async function saveVenue() {
     const { venue } = await api('/api/owner/venue', { method: 'PATCH', token: A.token,
       body: { name: $('#s-name').value, mode: $('#s-mode').value } });
     A.venue = venue; toast('Settings saved'); renderDash();
+  } catch (e) { toast(e.message); }
+}
+function renderPayFields() {
+  const mode = $('#p-mode').value; const v = A.venue; const el = $('#payFields'); if (!el) return;
+  if (mode === 'upi_direct') {
+    el.innerHTML = `<div class="field"><label>Your UPI ID (money goes straight to it)</label>
+      <input id="p-vpa" placeholder="e.g. batmancafe@okhdfcbank" value="${esc(v.upiVpa || '')}" maxlength="80" /></div>
+      <div style="font-size:12px;color:var(--sub)">Diners' UPI app opens with the amount and order number pre-filled. Your staff verifies on your UPI app/soundbox and confirms with one tap. Zero transaction fees.</div>`;
+  } else if (mode === 'phonepe') {
+    const pp = v.phonepe || {};
+    el.innerHTML = `
+      <div class="field"><label>PhonePe Client ID</label><input id="p-cid" value="${esc(pp.clientId || '')}" maxlength="120" /></div>
+      <div class="field"><label>Client Secret ${pp.hasSecret ? '(saved — leave blank to keep)' : ''}</label><input id="p-csec" type="password" placeholder="${pp.hasSecret ? '••••••••' : 'paste secret'}" maxlength="200" /></div>
+      <div style="display:flex;gap:8px">
+        <div class="field" style="flex:1"><label>Client Version</label><input id="p-cver" value="${esc(pp.clientVersion || '1')}" maxlength="10" /></div>
+        <div class="field" style="flex:1"><label>Environment</label>
+          <select id="p-env" style="width:100%;border:1px solid var(--line);border-radius:12px;padding:11px 13px;font-size:15px;background:#fff">
+            <option value="sandbox" ${pp.env !== 'prod' ? 'selected' : ''}>Sandbox (testing)</option>
+            <option value="prod" ${pp.env === 'prod' ? 'selected' : ''}>Production (real money)</option>
+          </select></div></div>
+      <div class="field"><label>Webhook username</label><input id="p-whu" value="${esc(pp.webhookUser || '')}" maxlength="80" /></div>
+      <div class="field"><label>Webhook password ${pp.hasWebhookPass ? '(saved — leave blank to keep)' : ''}</label><input id="p-whp" type="password" placeholder="${pp.hasWebhookPass ? '••••••••' : 'set a password'}" maxlength="120" /></div>
+      <div style="font-size:12px;color:var(--sub);word-break:break-all">In your PhonePe dashboard, set the webhook URL to:<br><b>${location.origin}/api/payments/phonepe/webhook/${esc(v.id)}</b><br>with the same username & password.</div>`;
+  } else {
+    el.innerHTML = `<div style="font-size:12px;color:var(--sub)">Orders marked "online" succeed instantly with fake money. Switch before going live.</div>`;
+  }
+}
+async function savePayments() {
+  const mode = $('#p-mode').value;
+  const body = { payMode: mode };
+  if (mode === 'upi_direct') body.upiVpa = $('#p-vpa').value.trim();
+  if (mode === 'phonepe') {
+    body.phonepe = { clientId: $('#p-cid').value.trim(), clientVersion: $('#p-cver').value.trim(),
+      env: $('#p-env').value, webhookUser: $('#p-whu').value.trim() };
+    const sec = $('#p-csec').value.trim(); if (sec) body.phonepe.clientSecret = sec;
+    const whp = $('#p-whp').value.trim(); if (whp) body.phonepe.webhookPass = whp;
+  }
+  try {
+    const { venue } = await api('/api/owner/payments', { method: 'PATCH', token: A.token, body });
+    A.venue = venue; renderDash(); toast('Payment settings saved');
   } catch (e) { toast(e.message); }
 }
 async function toggleStore(open) {

@@ -162,15 +162,23 @@ function renderBoard() {
 function ticket(o, action) {
   const unacked = K.unacked.has(o.token);
   const cashDue = o.method === 'cash' && !o.paid;
+  const upiClaimed = !o.paid && o.paymentState === 'claimed';
+  const upiAwaiting = !o.paid && o.payProvider === 'upi_direct' && o.paymentState === 'awaiting_payment';
   const payAfter = o.timing === 'after' && !o.paid && o.method !== 'cash';
   const mins = Math.max(0, Math.floor((Date.now() - o.placedAt) / 60000));
-  const badges = [
+  const extraPay = [
+    upiClaimed ? `<span class="pill" style="color:#17130F;background:var(--amber)">UPI claimed — verify</span>` : '',
+    upiAwaiting ? `<span class="pill" style="color:#C9A35B;background:#2A2114">Awaiting UPI</span>` : '',
+  ].join('');
+  const badges = [extraPay].concat([
     o.paid ? `<span class="pill" style="color:#0E7C57;background:#DDF3E9">${icon('check',12,2.6)} Paid</span>` : '',
     cashDue ? `<span class="pill" style="color:#9A6312;background:#FBF1DD">${icon('wallet',12)} Cash due</span>` : '',
     payAfter ? `<span class="pill" style="color:#6B6357;background:#EFEBE2">${icon('receipt',12)} Pay after</span>` : '',
-  ].join('');
+  ]).join('');
   const lines = o.items.map((it) => `<div class="li"><span class="q" style="color:var(--s-${o.status})">${it.qty}×</span><span class="diet ${it.diet}"><i></i></span><span class="nm">${esc(it.name)}</span></div>`).join('');
   const advanceBtn = o.status !== 'completed' ? `<button class="btn" style="background:var(--s-${o.status});color:#fff" onclick="advance(${o.token})">${action}</button>` : '';
+  const upiConfirmBtn = upiClaimed
+    ? `<button class="btn" style="background:var(--amber);color:#17130F;font-weight:800" onclick="event.stopPropagation();confirmUpi(${o.token})">✓ UPI received — confirm</button>` : '';
   const collectBtn = cashDue ? `<button class="btn" style="background:#FBF1DD;color:#9A6312;border:1px solid #F0DDB4" onclick="collect(${o.token})">Mark cash collected</button>`
     : (payAfter && (o.status === 'ready' || o.status === 'completed')) ? `<button class="btn btn-ghost" onclick="collect(${o.token})">Collect payment</button>` : '';
   const newBadge = unacked ? `<span class="pill pulse" style="color:#fff;background:var(--s-placed)">NEW</span>` : '';
@@ -182,7 +190,7 @@ function ticket(o, action) {
     <div class="head"><div><div class="tk">#${o.token}</div><div class="meta">Table ${esc(o.table)} · ${mins === 0 ? 'just now' : mins + 'm ago'}</div></div>
       <div class="badges">${newBadge}${badges}</div></div>
     <div class="lines">${lines}${noteLine}<div class="amt tabular">${money(o.total)}</div></div>
-    <div class="acts">${unpaidWarn}${advanceBtn}${collectBtn}${cancelBtn}</div></div>`;
+    <div class="acts">${unpaidWarn}${upiConfirmBtn}${advanceBtn}${upiClaimed ? '' : collectBtn}${cancelBtn}</div></div>`;
 }
 
 function historyRow(o) {
@@ -206,6 +214,13 @@ function historyRow(o) {
     <div style="display:flex;gap:6px;flex-wrap:wrap">${badges}</div>
     ${refundDue ? `<button class="btn" style="background:#E0A030;color:#17130F;font-size:13px;padding:8px 12px" onclick="markRefunded(${o.token})">Mark refunded</button>` : ''}
   </div>`;
+}
+async function confirmUpi(token) {
+  if (!confirm('Confirm the UPI money for order #' + token + ' has ARRIVED (check your UPI app / soundbox)?')) return;
+  try {
+    const { order } = await api(V('/kitchen/orders/' + token + '/collect'), { method: 'POST', token: K.token, body: { method: 'upi' } });
+    K.orders.set(order.token, order); renderBoard(); toast('UPI payment confirmed');
+  } catch (e) { toast(e.message); }
 }
 async function markRefunded(token) {
   if (!confirm('Confirm you have returned the money for order #' + token + '?')) return;

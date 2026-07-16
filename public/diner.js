@@ -225,12 +225,17 @@ async function placeOrder() {
   const cafe = app.config.venue.mode === 'cafe';
   const lines = Object.entries(app.cart).map(([id, qty]) => ({ id, qty }));
   try {
-    const { order } = await api(V('/orders'), { method: 'POST', body: {
+    const res = await api(V('/orders'), { method: 'POST', body: {
       table: app.table, sig: app.sig, lines,
       pay: { mode: cafe ? 'now' : app.payMode, method: app.method },
       note: app.note, idempotencyKey: app.idemKey,
     }});
+    const order = res.order;
     app.idemKey = null; app.cart = {}; app.note = '';
+    if (res.payment && res.payment.kind === 'phonepe' && res.payment.paymentUrl) {
+      rememberOrder(res.order); location.href = res.payment.paymentUrl; return; // off to the gateway
+    }
+    if (res.payment && res.payment.kind === 'error') toast(res.payment.error);
     app.orders = app.orders.filter((o) => o.token !== order.token).concat(order);
     rememberToken(order.token);
     app.currentToken = order.token;
@@ -327,6 +332,7 @@ function renderTrack() {
         <button class="btn btn-brand" onclick="settle('online')">Pay online</button>
         <button class="btn btn-ghost" onclick="settle('cash')">Cash at counter</button></div></div>`;
   }
+  html += paymentBox(o);
   if (o.status === 'placed') {
     html += `<button class="btn" style="width:100%;margin-top:12px;font-size:14px;color:#B23B3B;background:#FBEAEA;border:1px solid #F0CACA" onclick="cancelOrder(${o.token})">Cancel this order</button>`;
   }
@@ -351,6 +357,65 @@ async function cancelOrder(token) {
     app.orders = app.orders.map((x) => (x.token === order.token ? order : x));
     renderTrack(); toast(order.paid ? 'Cancelled — collect your refund at the counter' : 'Order cancelled');
   } catch (e) { toast(e.message); }
+}
+function buildUpiLink(order) {
+  const p = new URLSearchParams({ pa: app.config.upiVpa, pn: app.config.venue.name.slice(0, 40),
+    am: String(order.total), cu: 'INR', tn: 'TableTap order #' + order.token });
+  return 'upi://pay?' + p.toString();
+}
+async function claimUpiPaid(token) {
+  try {
+    const { order } = await api(V('/orders/' + token + '/upi-claimed'), { method: 'POST', body: { table: app.table, sig: app.sig } });
+    app.orders = app.orders.map((x) => (x.token === order.token ? order : x));
+    renderTrack(); toast('Staff will verify and confirm your payment');
+  } catch (e) { toast(e.message); }
+}
+let payPoll = null;
+function pollPaymentStatus(token) {
+  clearInterval(payPoll);
+  payPoll = setInterval(async () => {
+    try {
+      const { order } = await api(V('/orders/' + token + '/payment-status'));
+      const cur = getOrderLocal(token);
+      if (cur && (order.paid !== cur.paid || order.paymentState !== cur.paymentState)) {
+        app.orders = app.orders.map((x) => (x.token === order.token ? order : x));
+        renderTrack();
+      }
+      if (order.paid || order.paymentState === 'failed') clearInterval(payPoll);
+    } catch (_) {}
+  }, 4000);
+}
+function paymentBox(o) {
+  if (o.paid || o.status === 'cancelled') return '';
+  if (o.payProvider === 'upi_direct' && app.config.upiVpa) {
+    if (o.paymentState === 'claimed') {
+      return `<div class="card" style="padding:14px;margin-top:12px;background:#FBF1DD;border:1px solid #F0DDB4">
+        <b style="color:#7A5410">Payment claimed — staff will verify</b>
+        <div style="font-size:13px;color:#7A5410;margin-top:3px">Once the cafe confirms the money arrived, this order flips to Paid.</div></div>`;
+    }
+    return `<div class="card" style="padding:16px;margin-top:12px">
+      <b>Pay ${money(o.total)} by UPI</b>
+      <div style="font-size:13px;color:var(--sub);margin:4px 0 10px">Opens your UPI app with the amount and order number pre-filled — paid directly to ${esc(app.config.venue.name)}.</div>
+      <a class="btn btn-brand" style="width:100%;display:block;text-align:center;text-decoration:none" href="${buildUpiLink(o)}">Pay with any UPI app</a>
+      <div style="font-size:12px;color:var(--sub);margin-top:10px">App didn't open? Pay manually to <b>${esc(app.config.upiVpa)}</b>
+        <button class="mi-act" onclick="navigator.clipboard&&navigator.clipboard.writeText('${esc(app.config.upiVpa)}');toast('UPI ID copied')">Copy</button></div>
+      <button class="btn btn-ghost" style="width:100%;margin-top:10px;font-size:14px" onclick="claimUpiPaid(${o.token})">I've paid — notify staff</button>
+    </div>`;
+  }
+  if (o.payProvider === 'phonepe') {
+    if (o.paymentState === 'awaiting_payment') {
+      pollPaymentStatus(o.token);
+      return `<div class="card" style="padding:14px;margin-top:12px;background:#FBF1DD;border:1px solid #F0DDB4">
+        <b style="color:#7A5410">Confirming your payment…</b>
+        <div style="font-size:13px;color:#7A5410;margin-top:3px">This updates automatically the moment the gateway confirms. If you cancelled the payment, just pay at the counter.</div></div>`;
+    }
+    if (o.paymentState === 'failed') {
+      return `<div class="card" style="padding:14px;margin-top:12px;background:#FBEAEA;border:1px solid #F0CACA">
+        <b style="color:#8E2B2B">Payment didn't go through</b>
+        <div style="font-size:13px;color:#8E2B2B;margin-top:3px">No money was taken. Please pay cash at the counter, or ask staff for help.</div></div>`;
+    }
+  }
+  return '';
 }
 function dismissOrder(token) {
   const o = getOrderLocal(token);
