@@ -176,11 +176,13 @@ function ticket(o, action) {
   const newBadge = unacked ? `<span class="pill pulse" style="color:#fff;background:var(--s-placed)">NEW</span>` : '';
   const noteLine = o.note ? `<div style="margin-top:6px;font-size:13px;font-weight:600;background:#FBF1DD;color:#7A5410;border-radius:8px;padding:7px 9px">📝 ${esc(o.note)}</div>` : '';
   const cancelBtn = (o.status !== 'completed') ? `<button class="btn" style="background:transparent;color:#B23B3B;font-size:13px;padding:6px" onclick="event.stopPropagation();kitchenCancel(${o.token})">Cancel order</button>` : '';
+  const unpaidWarn = (o.status === 'ready' && !o.paid)
+    ? `<div style="background:#FBF1DD;color:#7A5410;border:1px solid #F0DDB4;border-radius:8px;padding:8px 10px;font-size:13px;font-weight:700">⚠ Collect ${money(o.total)} before handing over</div>` : '';
   return `<div class="ticket" style="border-top-color:var(--s-${o.status});${unacked ? 'box-shadow:0 0 0 3px var(--s-placed);' : ''}" onclick="ack(${o.token})">
     <div class="head"><div><div class="tk">#${o.token}</div><div class="meta">Table ${esc(o.table)} · ${mins === 0 ? 'just now' : mins + 'm ago'}</div></div>
       <div class="badges">${newBadge}${badges}</div></div>
     <div class="lines">${lines}${noteLine}<div class="amt tabular">${money(o.total)}</div></div>
-    <div class="acts">${advanceBtn}${collectBtn}${cancelBtn}</div></div>`;
+    <div class="acts">${unpaidWarn}${advanceBtn}${collectBtn}${cancelBtn}</div></div>`;
 }
 
 function historyRow(o) {
@@ -214,6 +216,14 @@ async function markRefunded(token) {
 }
 async function advance(token) {
   K.unacked.delete(token);
+  const o = K.orders.get(token);
+  // Guard the cash drawer: handing over an UNPAID order needs an explicit yes.
+  // A warning, not a hard block, on purpose — cafes sometimes hand over to a
+  // known regular and settle a minute later; the tap is still deliberate.
+  if (o && o.status === 'ready' && !o.paid) {
+    const how = o.method === 'cash' ? 'cash at the counter' : (o.timing === 'after' ? 'bill not settled yet' : 'payment pending');
+    if (!confirm('⚠ Order #' + token + ' is NOT PAID — ' + money(o.total) + ' due (' + how + ').\n\nCollect the money first, then hand over.\n\nHand over anyway?')) return;
+  }
   try { const { order } = await api(V('/kitchen/orders/' + token + '/advance'), { method: 'POST', token: K.token }); K.orders.set(order.token, order); renderBoard(); }
   catch (e) { toast(e.message); if (/sign-?in/i.test(e.message)) logout(); }
 }
